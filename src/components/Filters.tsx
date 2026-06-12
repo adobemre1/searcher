@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AccountInfo, RepoInfo } from '../api';
-import { ShieldCheck, Database, FolderGit, Filter, Terminal } from 'lucide-react';
+import { ShieldCheck, Database, FolderGit, Filter, Terminal, Sliders, RotateCcw, HelpCircle, Activity } from 'lucide-react';
 
 interface FiltersProps {
   accounts: AccountInfo[];
@@ -13,6 +13,18 @@ interface FiltersProps {
   setPathQuery: (val: string) => void;
   extQuery: string;
   setExtQuery: (val: string) => void;
+
+  // Calibrator mathematical inputs
+  similarityThreshold: number;
+  setSimilarityThreshold: (val: number) => void;
+  pathBoost: number;
+  setPathBoost: (val: number) => void;
+  k1: number;
+  setK1: (val: number) => void;
+  b: number;
+  setB: (val: number) => void;
+  maxLineLength: number;
+  setMaxLineLength: (val: number) => void;
 }
 
 export default function Filters({
@@ -25,9 +37,21 @@ export default function Filters({
   pathQuery,
   setPathQuery,
   extQuery,
-  setExtQuery
+  setExtQuery,
+  similarityThreshold,
+  setSimilarityThreshold,
+  pathBoost,
+  setPathBoost,
+  k1,
+  setK1,
+  b,
+  setB,
+  maxLineLength,
+  setMaxLineLength
 }: FiltersProps) {
   const [isOpen, setIsOpen] = useState(true);
+  const [isTunerExpanded, setIsTunerExpanded] = useState(false);
+  const [showHelp, setShowHelp] = useState<string | null>(null);
 
   const handleAccountToggle = (login: string) => {
     if (selectedAccounts.includes(login)) {
@@ -53,10 +77,33 @@ export default function Filters({
     }
   };
 
+  const handleResetCalibration = () => {
+    setSimilarityThreshold(0.10);
+    setPathBoost(0.25);
+    setK1(1.20);
+    setB(0.75);
+    setMaxLineLength(350);
+  };
+
+  // Dynamically calculate estimated scan complexity based on line length constraints and active selection
+  const selectedReposInstances = repos.filter(r => selectedRepos.includes(r.id));
+  const estimatedRepoLines = selectedReposInstances.reduce((sum, r) => sum + (r.lineCount || 0), 0);
+  
+  let complexityVibe = 'Low Cost';
+  let complexityColor = 'text-emerald-400';
+  if (estimatedRepoLines > 50000) {
+    complexityVibe = 'Moderate Cost';
+    complexityColor = 'text-amber-400';
+  }
+  if (estimatedRepoLines > 150000 || maxLineLength > 1000) {
+    complexityVibe = 'High Cost';
+    complexityColor = 'text-red-400';
+  }
+
   return (
     <div className={`flex flex-col bg-[#1E1F20] border-r border-[#2A2C2E] h-full transition-all duration-300 ${isOpen ? 'w-64' : 'w-12'}`}>
       {/* Collapse header */}
-      <div className="flex items-center justify-between border-b border-[#2A2C2E] px-3 py-2.5 text-xs font-semibold text-gray-400">
+      <div className="flex items-center justify-between border-b border-[#2A2C2E] px-3 py-2.5 text-xs font-semibold text-gray-400 shrink-0">
         {isOpen && (
           <div className="flex items-center gap-1.5 text-white">
             <Filter className="w-3.5 h-3.5 text-[#4F8CFF]" />
@@ -65,7 +112,7 @@ export default function Filters({
         )}
         <button
           onClick={() => setIsOpen(!isOpen)}
-          className="text-gray-500 hover:text-white p-1 rounded hover:bg-[#0F1115] mx-auto md:mx-0"
+          className="text-gray-550 hover:text-white p-1 rounded hover:bg-[#0F1115] mx-auto md:mx-0 font-mono transition-colors"
           title={isOpen ? 'Collapse panel' : 'Expand panel'}
         >
           {isOpen ? '◀' : '▶'}
@@ -73,17 +120,17 @@ export default function Filters({
       </div>
 
       {isOpen && (
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-5 select-none font-sans text-xs">
+        <div className="flex-1 overflow-y-auto px-3.5 py-4 space-y-4 select-none font-sans text-xs scrollbar-thin">
           {/* 1. Accounts Selector */}
           <div>
             <div className="text-gray-400 font-semibold mb-2 tracking-wide text-[10px] uppercase">
               GitHub Accounts
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {accounts.map(acc => (
                 <label 
                   key={acc.login} 
-                  className="flex items-center justify-between p-1.5 rounded bg-[#0F1115] hover:bg-zinc-850 cursor-pointer border border-transparent hover:border-zinc-700"
+                  className="flex items-center justify-between p-1.5 rounded bg-[#0F1115] hover:bg-zinc-850 cursor-pointer border border-[#2E3035]/30 hover:border-zinc-700 transition-all"
                 >
                   <div className="flex items-center gap-2">
                     <input
@@ -95,12 +142,12 @@ export default function Filters({
                     <span className="font-medium text-[#E3E3E3]">{acc.login}</span>
                   </div>
                   {acc.hasToken ? (
-                    <span className="bg-emerald-950 border border-emerald-800 text-emerald-400 font-bold px-1 rounded text-[9px] lowercase flex items-center gap-0.5">
+                    <span className="bg-emerald-950/60 border border-emerald-800/40 text-emerald-400 font-bold px-1 rounded text-[9px] lowercase flex items-center gap-0.5">
                       <ShieldCheck className="w-2.5 h-2.5" />
                       pat
                     </span>
                   ) : (
-                    <span className="bg-amber-950 border border-amber-900 text-amber-500 font-semibold px-1 py-0.2 rounded text-[9px]">
+                    <span className="bg-amber-950/60 border border-amber-900/40 text-amber-500 font-semibold px-1 py-0.2 rounded text-[9px]">
                       demo
                     </span>
                   )}
@@ -140,14 +187,14 @@ export default function Filters({
           </div>
 
           {/* 3. Repos Multi Select */}
-          <div className="flex flex-col flex-1 h-[40vh]">
-            <div className="flex items-center justify-between mb-2">
+          <div className="flex flex-col h-[28vh]">
+            <div className="flex items-center justify-between mb-1.5 shrink-0">
               <span className="text-gray-400 font-semibold tracking-wide text-[10px] uppercase">
                 Repositories ({repos.length})
               </span>
               <button
                 onClick={handleSelectAllRepos}
-                className="text-[#4F8CFF] hover:underline hover:text-white p-0 text-[10px]"
+                className="text-[#4F8CFF] hover:underline hover:text-white p-0 text-[10px] font-medium"
               >
                 {selectedRepos.length === repos.length ? 'Deselect All' : 'Select All'}
               </button>
@@ -191,6 +238,176 @@ export default function Filters({
                 ))
               )}
             </div>
+          </div>
+
+          {/* 4. Google-Grade Engine Calibration Panel (Accordion) */}
+          <div className="border border-[#2A2C2E] rounded bg-[#0F1115] overflow-hidden transition-all duration-300">
+            <button
+              onClick={() => setIsTunerExpanded(!isTunerExpanded)}
+              className="w-full flex items-center justify-between px-3 py-2 bg-[#252627] text-[10px] font-bold text-[#E3E3E3] hover:bg-[#2A2C2E] uppercase transition-colors"
+            >
+              <div className="flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-amber-500" />
+                <span>ENGINE CALIBRATION</span>
+              </div>
+              <span className="text-gray-500 text-[9px]">{isTunerExpanded ? '▲' : '▼'}</span>
+            </button>
+
+            {isTunerExpanded && (
+              <div className="p-3 space-y-3.5 border-t border-[#2A2C2E] text-[11px] bg-[#121316]">
+                {/* Calibration parameters description help bubbles */}
+                {showHelp && (
+                  <div className="bg-[#252627] border border-amber-900/40 rounded p-2 text-[10px] text-gray-300 leading-relaxed relative">
+                    <button 
+                      onClick={() => setShowHelp(null)} 
+                      className="absolute top-1 right-1 text-gray-500 hover:text-white"
+                    >
+                      ✕
+                    </button>
+                    {showHelp === 'similarity' && (
+                      <p><strong>Similarity Threshold</strong>: Minimum cosine overlay score to qualify a document. Set low for exploratory discovery, and high to discard ambient noise matches.</p>
+                    )}
+                    {showHelp === 'path' && (
+                      <p><strong>Path Boost Factor</strong>: Score modifier multiplier appended when the query keyword coincides with file folders or extension pathways.</p>
+                    )}
+                    {showHelp === 'k1' && (
+                      <p><strong>BM25 k1 coefficient</strong>: Scales frequency saturation. Lowering suppresses repeating jargon; higher mimics classic boolean frequency growth patterns.</p>
+                    )}
+                    {showHelp === 'b' && (
+                      <p><strong>BM25 b coefficient</strong>: Document length penalization. b=1 heavily penalizes long boilerplate codebase structures; b=0 disables physical size weight penalties.</p>
+                    )}
+                    {showHelp === 'linelen' && (
+                      <p><strong>Line-Length Boundary</strong>: Defensive limit ignoring lines over this limit (e.g. minified pack files) protecting execution clock speeds.</p>
+                    )}
+                  </div>
+                )}
+
+                {/* Parameter 1: Similarity Threshold */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-gray-400">
+                    <span className="flex items-center gap-1">
+                      Similarity Threshold
+                      <button onClick={() => setShowHelp('similarity')} className="hover:text-[#4F8CFF] cursor-help">
+                        <HelpCircle className="w-3 h-3" />
+                      </button>
+                    </span>
+                    <span className="font-mono text-white text-[10px]">{similarityThreshold.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.01"
+                    max="0.90"
+                    step="0.05"
+                    value={similarityThreshold}
+                    onChange={e => setSimilarityThreshold(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-[#1E1F20] rounded-lg appearance-none cursor-pointer accent-[#4F8CFF]"
+                  />
+                </div>
+
+                {/* Parameter 2: Path Boost */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-gray-400">
+                    <span className="flex items-center gap-1">
+                      Path Boost Factor
+                      <button onClick={() => setShowHelp('path')} className="hover:text-[#4F8CFF] cursor-help">
+                        <HelpCircle className="w-3 h-3" />
+                      </button>
+                    </span>
+                    <span className="font-mono text-white text-[10px]">{pathBoost.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.00"
+                    max="1.00"
+                    step="0.05"
+                    value={pathBoost}
+                    onChange={e => setPathBoost(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-[#1E1F20] rounded-lg appearance-none cursor-pointer accent-[#4F8CFF]"
+                  />
+                </div>
+
+                {/* Parameter 3: BM25 k1 */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-gray-400">
+                    <span className="flex items-center gap-1">
+                      BM25 Saturation (k1)
+                      <button onClick={() => setShowHelp('k1')} className="hover:text-[#4F8CFF] cursor-help">
+                        <HelpCircle className="w-3 h-3" />
+                      </button>
+                    </span>
+                    <span className="font-mono text-white text-[10px]">{k1.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.10"
+                    max="3.00"
+                    step="0.10"
+                    value={k1}
+                    onChange={e => setK1(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-[#1E1F20] rounded-lg appearance-none cursor-pointer accent-[#4F8CFF]"
+                  />
+                </div>
+
+                {/* Parameter 4: BM25 b */}
+                 <div className="space-y-1">
+                  <div className="flex justify-between items-center text-gray-400">
+                    <span className="flex items-center gap-1">
+                      BM25 Normalization (b)
+                      <button onClick={() => setShowHelp('b')} className="hover:text-[#4F8CFF] cursor-help">
+                        <HelpCircle className="w-3 h-3" />
+                      </button>
+                    </span>
+                    <span className="font-mono text-white text-[10px]">{b.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.00"
+                    max="1.00"
+                    step="0.05"
+                    value={b}
+                    onChange={e => setB(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-[#1E1F20] rounded-lg appearance-none cursor-pointer accent-[#4F8CFF]"
+                  />
+                </div>
+
+                {/* Parameter 5: Max Line Length limit */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-gray-400">
+                    <span className="flex items-center gap-1">
+                      Max Scanned Line Length
+                      <button onClick={() => setShowHelp('linelen')} className="hover:text-[#4F8CFF] cursor-help">
+                        <HelpCircle className="w-3 h-3" />
+                      </button>
+                    </span>
+                    <span className="font-mono text-white text-[10px]">{maxLineLength} ch</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="100"
+                    max="1500"
+                    step="50"
+                    value={maxLineLength}
+                    onChange={e => setMaxLineLength(parseInt(e.target.value, 10))}
+                    className="w-full h-1 bg-[#1E1F20] rounded-lg appearance-none cursor-pointer accent-[#4F8CFF]"
+                  />
+                </div>
+
+                {/* Calibration metadata and reset triggers */}
+                <div className="border-t border-[#2A2C2E]/50 pt-2.5 flex items-center justify-between text-[9px] text-gray-500 font-mono">
+                  <div className="flex items-center gap-1">
+                    <Activity className="w-3 h-3 text-emerald-500" />
+                    <span>Cost: <strong className={complexityColor}>{complexityVibe}</strong></span>
+                  </div>
+                  <button
+                    onClick={handleResetCalibration}
+                    className="text-gray-450 hover:text-white hover:underline uppercase flex items-center gap-1 transition-colors p-0.5"
+                  >
+                    <RotateCcw className="w-2.5 h-2.5" />
+                    <span>Reset Calibration</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

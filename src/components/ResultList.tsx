@@ -65,7 +65,7 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
     );
   }
 
-  const { results, pathMatches, totalFound, truncated, tookMs, apiCallsUsed } = response;
+  const { results, pathMatches, totalFound, truncated, tookMs, apiCallsUsed, explanation } = response;
 
   if (results.length === 0 && pathMatches.length === 0) {
     return (
@@ -103,7 +103,21 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
         </div>
       </div>
 
-      <div className="p-4 space-y-6 flex-1 max-w-full">
+      <div className="p-4 space-y-4 flex-1 max-w-full">
+        {/* AI Semantic insights Explanation box */}
+        {explanation && (
+          <div className="bg-[#181C25] border border-[#3E65B3]/40 rounded p-4 relative overflow-hidden shadow-md">
+            <div className="absolute top-0 left-0 w-1 h-full bg-[#4F8CFF]" />
+            <div className="flex gap-2.5 items-start">
+              <Sparkles className="w-4.5 h-4.5 text-[#4F8CFF] shrink-0 mt-0.5 animate-pulse" />
+              <div className="space-y-1">
+                <span className="block text-[10px] text-gray-400 font-mono uppercase tracking-wider font-bold">Genesis Quantum Code Semantic Insight</span>
+                <p className="text-xs text-gray-200 font-sans leading-relaxed select-text">{explanation}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* 2. Pinned PathMatches Header Category (AC-04) */}
         {pathMatches.length > 0 && (
           <div className="bg-[#1E1F20] border border-[#2A2C2E] rounded">

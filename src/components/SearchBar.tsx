@@ -4,8 +4,8 @@ import { Search, SlidersHorizontal, RefreshCw, HelpCircle, Monitor, Cpu } from '
 interface SearchBarProps {
   q: string;
   setQ: (val: string) => void;
-  mode: 'mirror' | 'live';
-  setMode: (val: 'mirror' | 'live') => void;
+  mode: 'mirror' | 'live' | 'semantic';
+  setMode: (val: 'mirror' | 'live' | 'semantic') => void;
   regex: boolean;
   setRegex: (val: boolean) => void;
   word: boolean;
@@ -108,7 +108,7 @@ export default function SearchBar({
 
       {/* Control Tools */}
       <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
-        {/* Mirror vs Live Pills */}
+        {/* Mirror vs Live vs Semantic Pills */}
         <div className="bg-[#0F1115] border border-[#2A2C2E] p-0.5 rounded flex items-center">
           <button
             onClick={() => setMode('mirror')}
@@ -129,6 +129,16 @@ export default function SearchBar({
             }`}
           >
             Live Mode
+          </button>
+          <button
+            onClick={() => setMode('semantic')}
+            className={`px-3 py-1 text-xs font-semibold rounded transition-colors ${
+              mode === 'semantic'
+                ? 'bg-[#4F8CFF] text-[#0F1115]'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Semantic Mode
           </button>
         </div>
 

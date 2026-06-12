@@ -43,11 +43,85 @@ export interface SearchResponse {
 let memoryIndex: IndexedFile[] = [];
 let lastLoadTime = 0;
 
+export function getMemoryIndex(): IndexedFile[] {
+  return memoryIndex;
+}
+
 /**
  * Escapes special characters for usage in regular expressions.
  */
 function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export interface ParsedQuery {
+  exactPhrases: string[];
+  positiveTerms: string[];
+  negativeTerms: string[];
+}
+
+/**
+ * Parses double-quoted exact match substrings and negative exclusion terms starting with minus (-)
+ */
+export function parseBooleanQuery(q: string, fold: boolean, caseSensitive: boolean): ParsedQuery {
+  const normalize = (s: string) => {
+    let res = s;
+    if (fold) {
+      res = foldTurkish(res);
+    } else if (!caseSensitive) {
+      res = res.toLowerCase();
+    }
+    return res;
+  };
+
+  const exactPhrases: string[] = [];
+  const positiveTerms: string[] = [];
+  const negativeTerms: string[] = [];
+
+  // Match quoted phrases
+  const regexQuoted = /"([^"]+)"/g;
+  let match;
+  let cleaned = q;
+  while ((match = regexQuoted.exec(q)) !== null) {
+    if (match[1].trim()) {
+      exactPhrases.push(normalize(match[1]));
+    }
+    cleaned = cleaned.replace(match[0], ' ');
+  }
+
+  // Split remainder by spaces
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  for (const part of parts) {
+    if (part.startsWith('-') && part.length > 1) {
+      negativeTerms.push(normalize(part.substring(1)));
+    } else {
+      positiveTerms.push(normalize(part));
+    }
+  }
+
+  return { exactPhrases, positiveTerms, negativeTerms };
+}
+
+/**
+ * Merges overlapping or touching MatchRanges to prevent front-end highlighting distortions
+ */
+export function mergeRanges(ranges: MatchRange[]): MatchRange[] {
+  if (ranges.length === 0) return [];
+  // Sort by start position
+  ranges.sort((a, b) => a.start - b.start);
+  
+  const merged: MatchRange[] = [ranges[0]];
+  for (let i = 1; i < ranges.length; i++) {
+    const last = merged[merged.length - 1];
+    const curr = ranges[i];
+    if (curr.start <= last.start + last.length) {
+      // Overlap or touch, extend current range duration
+      last.length = Math.max(last.length, curr.start + curr.length - last.start);
+    } else {
+      merged.push(curr);
+    }
+  }
+  return merged;
 }
 
 /**
@@ -187,23 +261,64 @@ export function searchMirror(params: {
       return null;
     };
   } else {
-    // Standard Substring Search Matcher - highly optimized 
+    // Advanced Boolean Parser + Negative Term exclusion + Substring Highlighting Engine
     const isFoldActive = params.fold;
     const isCase = params.caseSensitive;
-    const procQuery = isFoldActive ? foldTurkish(rawQuery) : (isCase ? rawQuery : rawQuery.toLowerCase());
+    const parsedQuery = parseBooleanQuery(rawQuery, isFoldActive, isCase);
 
     textMatcher = (line: string, foldedLine: string) => {
       const targetStr = isFoldActive ? foldedLine : (isCase ? line : line.toLowerCase());
-      
-      let index = targetStr.indexOf(procQuery);
-      if (index === -1) return null;
 
-      const ranges: MatchRange[] = [];
-      while (index !== -1) {
-        ranges.push({ start: index, length: procQuery.length });
-        index = targetStr.indexOf(procQuery, index + procQuery.length);
+      // 1. Check negative exclusions first
+      for (const neg of parsedQuery.negativeTerms) {
+        if (targetStr.includes(neg)) {
+          return null; // Skip line entirely
+        }
       }
-      return ranges;
+
+      // 2. Exact phrases must ALL match
+      for (const phrase of parsedQuery.exactPhrases) {
+        if (!targetStr.includes(phrase)) {
+          return null; // Skip line
+        }
+      }
+
+      // 3. Positive terms must ALL match
+      for (const term of parsedQuery.positiveTerms) {
+        if (!targetStr.includes(term)) {
+          return null; // Skip line
+        }
+      }
+
+      // 4. Gather multiple highlighted match ranges
+      const ranges: MatchRange[] = [];
+      
+      for (const phrase of parsedQuery.exactPhrases) {
+        let index = targetStr.indexOf(phrase);
+        while (index !== -1) {
+          ranges.push({ start: index, length: phrase.length });
+          index = targetStr.indexOf(phrase, index + phrase.length);
+        }
+      }
+
+      for (const term of parsedQuery.positiveTerms) {
+        let index = targetStr.indexOf(term);
+        while (index !== -1) {
+          ranges.push({ start: index, length: term.length });
+          index = targetStr.indexOf(term, index + term.length);
+        }
+      }
+
+      // If nothing to highlight but we still passed validation, return a full-row mock or default range
+      if (ranges.length === 0) {
+        if (parsedQuery.negativeTerms.length > 0) {
+          return [];
+        }
+        return null;
+      }
+
+      // Merge overlap segments securely
+      return mergeRanges(ranges);
     };
   }
 

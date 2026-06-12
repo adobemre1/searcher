@@ -1,15 +1,16 @@
 import React from 'react';
-import { SyncStatus, triggerSync, RepoInfo } from '../api';
-import { RefreshCw, Play, AlertTriangle, CheckCircle, Info, Archive } from 'lucide-react';
+import { SyncStatus, triggerSync, deleteRepoCache, RepoInfo } from '../api';
+import { RefreshCw, Play, AlertTriangle, CheckCircle, Info, Archive, Trash2 } from 'lucide-react';
 
 interface SyncPanelProps {
   status: SyncStatus | null;
+  cachedRepos: RepoInfo[];
   onRefresh: () => void;
   isOpen: boolean;
   onClose: () => void;
 }
 
-export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPanelProps) {
+export default function SyncPanel({ status, cachedRepos, onRefresh, isOpen, onClose }: SyncPanelProps) {
   if (!isOpen) return null;
 
   const handleTriggerSync = async (force = false) => {
@@ -21,8 +22,34 @@ export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPa
     }
   };
 
+  const handleDeleteCache = async (repoId: string) => {
+    if (!confirm(`Are you sure you want to purge the local index cache for ${repoId}?`)) {
+      return;
+    }
+    try {
+      await deleteRepoCache(repoId);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Purge failed: ${err.message}`);
+    }
+  };
+
   const activeSync = status?.active || false;
-  const reposList = status ? Object.values(status.repos) : [];
+  
+  // Choose dynamic list: active execution list or cached directory assets
+  const reposList = activeSync 
+    ? (status ? Object.values(status.repos).map(r => ({ ...r, id: `${r.owner}/${r.name}` })) : []) 
+    : cachedRepos.map(r => ({
+        owner: r.owner,
+        name: r.name,
+        isPrivate: r.private,
+        status: r.status,
+        fileCount: r.fileCount || 0,
+        lineCount: r.lineCount || 0,
+        skipped: r.skipped,
+        id: r.id,
+        error: undefined
+      }));
   
   // Calculate completion percentage
   const total = status?.totalRepos || 0;
@@ -39,7 +66,7 @@ export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPa
         </div>
         <button
           onClick={onClose}
-          className="text-gray-500 hover:text-white p-1 rounded hover:bg-[#0F1115]"
+          className="text-gray-550 hover:text-white p-1 rounded hover:bg-[#0F1115]"
         >
           ✕
         </button>
@@ -51,7 +78,7 @@ export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPa
           <button
             onClick={() => handleTriggerSync(false)}
             disabled={activeSync}
-            className="flex-1 bg-[#4F8CFF] hover:bg-[#3d70cc] text-[#0F1115] disabled:bg-zinc-800 disabled:text-gray-500 font-bold py-2 rounded text-xs transition-colors flex items-center justify-center gap-1.5"
+            className="flex-1 bg-[#4F8CFF] hover:bg-[#3d70cc] text-[#0F1115] disabled:bg-zinc-800 disabled:text-gray-500 font-bold py-2 rounded text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
           >
             <Play className="w-3.5 h-3.5" />
             <span>Sync All</span>
@@ -60,7 +87,7 @@ export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPa
           <button
             onClick={() => handleTriggerSync(true)}
             disabled={activeSync}
-            className="border border-[#2C2E35] hover:border-zinc-700 hover:bg-zinc-900 disabled:border-zinc-800 disabled:text-zinc-650 font-semibold px-2 rounded text-xs text-[#E3E3E3] transition-colors"
+            className="border border-[#2C2E35] hover:border-zinc-700 hover:bg-zinc-900 disabled:border-zinc-800 disabled:text-zinc-650 font-semibold px-2 rounded text-xs text-[#E3E3E3] transition-colors cursor-pointer disabled:cursor-not-allowed"
             title="Ignore local caches and force-download everything"
           >
             Force Sync
@@ -106,14 +133,27 @@ export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPa
           </div>
         ) : (
           reposList.map((repo, i) => (
-            <div key={i} className="p-3 space-y-1.5 hover:bg-[#15171B] transition-colors">
+            <div key={i} className="p-3 space-y-1.5 hover:bg-[#15171B] transition-colors relative group">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-[#E3E3E3] truncate text-xs" title={repo.name}>
+                <span className="font-semibold text-[#E3E3E3] truncate text-xs" title={repo.id}>
                   {repo.owner}/{repo.name}
                 </span>
                 
-                {/* Status custom badge colors */}
-                <StatusBadge status={repo.status} />
+                <div className="flex items-center gap-1.5">
+                  {/* Status custom badge colors */}
+                  <StatusBadge status={repo.status} />
+
+                  {/* Selective cache purge trash triggers */}
+                  {!activeSync && repo.status === 'indexed' && (
+                    <button
+                      onClick={() => handleDeleteCache(repo.id)}
+                      className="text-gray-500 hover:text-red-400 p-1 rounded transition-colors cursor-pointer"
+                      title="Purge cached shard copy"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Counts or metrics if successful */}
@@ -137,7 +177,7 @@ export default function SyncPanel({ status, onRefresh, isOpen, onClose }: SyncPa
                   <span>Oversize: {repo.skipped.oversize}</span>
                   <span>Binary: {repo.skipped.binary}</span>
                   <span>Empty: {repo.skipped.empty}</span>
-                  {repo.skipped.budget > 0 && <span className="text-red-500">Budget Limit Triggered!</span>}
+                  {repo.skipped.budget > 0 && <span className="text-red-500">Budget Limit Triggered...</span>}
                 </div>
               )}
 

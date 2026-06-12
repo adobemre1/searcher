@@ -75,6 +75,7 @@ export interface SearchResponse {
   truncated: boolean;
   tookMs: number;
   apiCallsUsed: number;
+  explanation?: string;
   retryAfterSec?: number;
 }
 
@@ -147,7 +148,7 @@ export async function getDoctor(): Promise<DoctorResponse> {
 
 export interface SearchParams {
   q: string;
-  mode: 'mirror' | 'live';
+  mode: 'mirror' | 'live' | 'semantic';
   regex: boolean;
   word: boolean;
   caseSensitive: boolean;
@@ -156,6 +157,11 @@ export interface SearchParams {
   repos?: string[];
   path?: string;
   ext?: string;
+  similarityThreshold?: number;
+  pathBoost?: number;
+  k1?: number;
+  b?: number;
+  maxLineLength?: number;
 }
 
 export async function search(params: SearchParams): Promise<SearchResponse> {
@@ -179,6 +185,21 @@ export async function search(params: SearchParams): Promise<SearchResponse> {
   if (params.ext) {
     urlParams.set('ext', params.ext);
   }
+  if (params.similarityThreshold !== undefined) {
+    urlParams.set('similarityThreshold', String(params.similarityThreshold));
+  }
+  if (params.pathBoost !== undefined) {
+    urlParams.set('pathBoost', String(params.pathBoost));
+  }
+  if (params.k1 !== undefined) {
+    urlParams.set('k1', String(params.k1));
+  }
+  if (params.b !== undefined) {
+    urlParams.set('b', String(params.b));
+  }
+  if (params.maxLineLength !== undefined) {
+    urlParams.set('maxLineLength', String(params.maxLineLength));
+  }
 
   const res = await fetch(`/api/search?${urlParams.toString()}`);
   if (!res.ok) {
@@ -192,7 +213,7 @@ export interface SearchLog {
   id: string;
   timestamp: string;
   q: string;
-  mode: 'mirror' | 'live';
+  mode: 'mirror' | 'live' | 'semantic';
   regex: boolean;
   word: boolean;
   caseSensitive: boolean;
@@ -218,6 +239,7 @@ export interface TelemetryData {
     mirrorTookMs: number;
     liveTookMs: number;
     totalSearches: number;
+    queryEntropy: number;
   };
   coresStatus: { id: number; active: boolean; loadPercent: number }[];
 }
@@ -236,4 +258,50 @@ export async function getTelemetryData(): Promise<TelemetryData> {
   const res = await fetch('/api/telemetry');
   return res.json();
 }
+
+export async function deleteRepoCache(id: string): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch('/api/repos/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  });
+  if (!res.ok) {
+    const errorPayload = await res.json();
+    throw new Error(errorPayload.error || 'Failed to purge repository index');
+  }
+  return res.json();
+}
+
+export interface BenchmarkResponse {
+  ok: boolean;
+  timestamp: string;
+  engines: {
+    typescript: {
+      matrixMultiply1000TimesTimeMs: number;
+      shannonEntropyResult: number;
+    };
+    python: {
+      available: boolean;
+      matrixMultiply1000TimesTimeMs: number | null;
+      shannonEntropyResult: number | null;
+      error: string | null;
+    };
+  };
+  calibration: {
+    precisionDelta: number;
+    isPrecisionVerified: boolean;
+    multiplier: number;
+    recommendation: string;
+  };
+}
+
+export async function runBenchmark(): Promise<BenchmarkResponse> {
+  const res = await fetch('/api/benchmark', { method: 'POST' });
+  if (!res.ok) {
+    const errPayload = await res.json();
+    throw new Error(errPayload.error || 'Benchmark pipeline failed');
+  }
+  return res.json();
+}
+
 

@@ -3,8 +3,10 @@ import {
   getSearchHistory,
   clearSearchHistory,
   getTelemetryData,
+  runBenchmark,
   SearchLog,
-  TelemetryData
+  TelemetryData,
+  BenchmarkResponse
 } from '../api';
 import { 
   Cpu, 
@@ -17,7 +19,10 @@ import {
   RefreshCw,
   Gauge,
   Layers,
-  Database
+  Database,
+  BarChart2,
+  CheckCircle,
+  AlertTriangle
 } from 'lucide-react';
 
 interface TelemetryDrawerProps {
@@ -31,7 +36,12 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'telemetry' | 'history'>('telemetry');
+  const [tab, setTab] = useState<'telemetry' | 'history' | 'benchmark'>('telemetry');
+
+  // Benchmark States
+  const [benchData, setBenchData] = useState<BenchmarkResponse | null>(null);
+  const [benchLoading, setBenchLoading] = useState(false);
+  const [benchError, setBenchError] = useState<string | null>(null);
 
   const loadData = async () => {
     try {
@@ -43,6 +53,19 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
       setTelemetry(tel);
     } catch (err: any) {
       setError(err?.message || 'Failed to pull system diagnostic traces');
+    }
+  };
+
+  const startBenchmark = async () => {
+    setBenchLoading(true);
+    setBenchError(null);
+    try {
+      const data = await runBenchmark();
+      setBenchData(data);
+    } catch (err: any) {
+      setBenchError(err?.message || 'Failed to complete benchmark suite.');
+    } finally {
+      setBenchLoading(false);
     }
   };
 
@@ -60,6 +83,12 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
       return () => clearInterval(poll);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && tab === 'benchmark' && !benchData && !benchLoading) {
+      startBenchmark();
+    }
+  }, [isOpen, tab]);
 
   const handleClearHistory = async () => {
     if (window.confirm('Clear all search trace history logs? This action is local and permanent.')) {
@@ -98,19 +127,29 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
               <p className="text-[10px] text-zinc-500">16-Core Layout & E2E Search Log Trace Auditor</p>
             </div>
           </div>
-          <button 
-            onClick={onClose}
-            className="text-gray-500 hover:text-white px-2 py-1 text-sm bg-zinc-800 rounded hover:bg-zinc-700 transition-colors"
-          >
-            ✕ Close
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => window.open('/api/telemetry/export', '_blank')}
+              className="text-[#4F8CFF] hover:bg-[#4F8CFF]/10 hover:text-white px-3 py-1.5 text-[11px] border border-[#4F8CFF]/30 rounded transition-colors font-semibold flex items-center gap-1.5 cursor-pointer"
+              title="Download fully optimized System JSON health telemetry report"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Export Report</span>
+            </button>
+            <button 
+              onClick={onClose}
+              className="text-gray-500 hover:text-white px-2.5 py-1.5 text-[11px] bg-zinc-800 rounded hover:bg-zinc-700 transition-colors font-medium border border-zinc-700/50 cursor-pointer"
+            >
+              ✕ Close
+            </button>
+          </div>
         </div>
 
         {/* Tab Controls */}
         <div className="p-2 bg-[#1A1C20] border-b border-[#2A2C2E] flex gap-2">
           <button
             onClick={() => setTab('telemetry')}
-            className={`flex-1 py-1.5 rounded text-xs font-semibold flex items-center justify-center gap-2 transition-colors ${
+            className={`flex-1 py-1.5 rounded text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
               tab === 'telemetry' 
                 ? 'bg-[#4F8CFF] text-[#0F1115]' 
                 : 'bg-[#121418] border border-[#2A2C2E] text-gray-400 hover:text-white'
@@ -122,14 +161,26 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
           
           <button
             onClick={() => setTab('history')}
-            className={`flex-1 py-1.5 rounded text-xs font-semibold flex items-center justify-center gap-2 transition-colors ${
+            className={`flex-1 py-1.5 rounded text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
               tab === 'history' 
                 ? 'bg-[#4F8CFF] text-[#0F1115]' 
                 : 'bg-[#121418] border border-[#2A2C2E] text-gray-400 hover:text-white'
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span>Search Query Trace Logs ({history.length})</span>
+            <span>Query Logs ({history.length})</span>
+          </button>
+
+          <button
+            onClick={() => setTab('benchmark')}
+            className={`flex-1 py-1.5 rounded text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+              tab === 'benchmark' 
+                ? 'bg-[#4F8CFF] text-[#0F1115]' 
+                : 'bg-[#121418] border border-[#2A2C2E] text-gray-400 hover:text-white'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Quantum Benchmark</span>
           </button>
         </div>
 
@@ -156,7 +207,7 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
               </div>
 
               {/* Statistics Counters Grid */}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
                 <div className="p-3 bg-[#1A1C1E] border border-zinc-800 rounded shadow-sm">
                   <span className="block text-zinc-500 text-[10px] uppercase tracking-wider font-medium">Index Read Speed</span>
                   <div className="text-white text-base font-extrabold font-mono mt-1">
@@ -179,6 +230,14 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
                     {formatMB(telemetry.nodejsMemory.heapUsed)}
                   </div>
                   <span className="text-[9px] text-[#4F8CFF] block mt-0.5">Total heap: {formatMB(telemetry.nodejsMemory.heapTotal)}</span>
+                </div>
+
+                <div className="p-3 bg-[#1A1C1E] border border-zinc-800 rounded shadow-sm">
+                  <span className="block text-zinc-500 text-[10px] uppercase tracking-wider font-medium">Shannon Entropy</span>
+                  <div className="text-white text-base font-extrabold font-mono mt-1">
+                    {telemetry.averages.queryEntropy !== undefined ? telemetry.averages.queryEntropy.toFixed(3) : '0.000'} <span className="text-sm font-sans text-gray-400 font-normal">bits</span>
+                  </div>
+                  <span className="text-[9px] text-amber-500 block mt-0.5">Query distribution metric</span>
                 </div>
               </div>
 
@@ -309,6 +368,142 @@ export default function TelemetryDrawer({ isOpen, onClose, onSelectQuery }: Tele
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'benchmark' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-white text-xs font-bold uppercase tracking-wider">Cross-Engine Math Calibration</h4>
+                  <p className="text-[10px] text-zinc-550">1,000 runs of 15x15 Matrix Multiplication & Shannon Entropy alignment</p>
+                </div>
+                <button
+                  onClick={startBenchmark}
+                  disabled={benchLoading}
+                  className="bg-[#4F8CFF] hover:bg-[#3d70cc] text-[#0F1115] disabled:bg-zinc-800 disabled:text-gray-500 font-bold px-3 py-1.5 rounded text-[11px] transition-colors flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className={`w-3 h-3 ${benchLoading ? 'animate-spin' : ''}`} />
+                  <span>Re-run Calibration</span>
+                </button>
+              </div>
+
+              {benchLoading && (
+                <div className="text-center py-20 text-zinc-500 space-y-3">
+                  <RefreshCw className="w-8 h-8 mx-auto text-[#4F8CFF] animate-spin" />
+                  <p className="text-xs">Computing matrices on TypeScript (V8 JIT) and Python 3 shell instances...</p>
+                </div>
+              )}
+
+              {benchError && (
+                <div className="bg-red-950/40 border border-red-900/50 p-4 rounded text-red-400 text-xs flex gap-2">
+                  <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+                  <span>{benchError}</span>
+                </div>
+              )}
+
+              {!benchLoading && !benchError && benchData && (
+                <div className="space-y-6">
+                  {/* Side-by-Side engines comparison */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* TypeScript Block */}
+                    <div className="p-4 bg-zinc-900/60 border border-zinc-800 rounded-lg space-y-3 relative overflow-hidden">
+                      <div className="absolute top-0 right-0 px-2 py-0.5 bg-[#4F8CFF]/10 text-[#4F8CFF] border-b border-l border-[#4F8CFF]/20 text-[9px] uppercase font-mono rounded-bl font-semibold">
+                        V8 JIT Compiler
+                      </div>
+                      <div className="text-white font-bold text-xs uppercase tracking-wide">TypeScript Core</div>
+                      
+                      <div className="space-y-1.5 pt-1.5">
+                        <div>
+                          <span className="text-[9px] text-zinc-500 block uppercase font-medium">Matrix Mult (1,000x):</span>
+                          <span className="text-white font-semibold font-mono text-xs">
+                            {benchData.engines.typescript.matrixMultiply1000TimesTimeMs.toFixed(2)}
+                            <span className="text-[10px] text-zinc-400 ml-1">ms</span>
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-zinc-500 block uppercase font-medium">Shannon Entropy Result:</span>
+                          <span className="text-zinc-300 font-mono text-[10px] break-all block">
+                            {benchData.engines.typescript.shannonEntropyResult.toFixed(10)}
+                            <span className="text-[9px] text-zinc-550 ml-1">bits</span>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Python Block */}
+                    <div className="p-4 bg-zinc-900/60 border border-zinc-800 rounded-lg space-y-3 relative overflow-hidden">
+                      <div className="absolute top-0 right-0 px-2 py-0.5 bg-amber-500/10 text-amber-500 border-b border-l border-amber-500/20 text-[9px] uppercase font-mono rounded-bl font-semibold">
+                        Python 3 VM
+                      </div>
+                      <div className="text-white font-bold text-xs uppercase tracking-wide">Python Core</div>
+                      
+                      {benchData.engines.python.available ? (
+                        <div className="space-y-1.5 pt-1.5">
+                          <div>
+                            <span className="text-[9px] text-zinc-500 block uppercase font-medium">Matrix Mult (1,000x):</span>
+                            <span className="text-white font-semibold font-mono text-xs">
+                              {benchData.engines.python.matrixMultiply1000TimesTimeMs?.toFixed(2)}
+                              <span className="text-[10px] text-zinc-400 ml-1">ms</span>
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[9px] text-zinc-500 block uppercase font-medium">Shannon Entropy Result:</span>
+                            <span className="text-zinc-300 font-mono text-[10px] break-all block">
+                              {benchData.engines.python.shannonEntropyResult?.toFixed(10)}
+                              <span className="text-[9px] text-zinc-550 ml-1">bits</span>
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-red-400 text-xs font-mono pt-4">
+                          Python engine unavailable: {benchData.engines.python.error}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Calibration results */}
+                  <div className="p-4 bg-zinc-900/40 border border-zinc-800 rounded-lg space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">Calibration Metrics</span>
+                      <span className="text-[10px] font-mono text-[#4F8CFF]">Precision Tolerances Checked</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Speedup Meter */}
+                      <div className="p-3 bg-[#1A1C20] rounded border border-zinc-800/80 space-y-1">
+                        <span className="text-[9px] text-zinc-500 uppercase font-medium block">TS Speed Ratio Advantage</span>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-lg font-bold font-mono text-emerald-400">
+                            x{benchData.calibration.multiplier.toFixed(2)}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-sans">times faster</span>
+                        </div>
+                      </div>
+
+                      {/* Precision Status */}
+                      <div className="p-3 bg-[#1A1C20] rounded border border-zinc-800/80 space-y-1">
+                        <span className="text-[9px] text-zinc-500 uppercase font-medium block">Shannon Precision Alignment</span>
+                        <div className="flex items-center gap-1.5">
+                          <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                          <span className="text-[11px] font-bold font-mono text-zinc-300 leading-none">
+                            {benchData.calibration.precisionDelta < 1e-15 
+                              ? "Exact Core Parity" 
+                              : `Delta: ${benchData.calibration.precisionDelta.toExponential(2)}`}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Systems recommendation bar */}
+                    <div className="p-3 bg-sky-950/20 border border-sky-900/30 text-[11px] rounded text-sky-400 leading-relaxed font-sans select-text">
+                      <span className="font-bold block text-sky-300 mb-0.5">Architect Calibration Recommendation:</span>
+                      {benchData.calibration.recommendation}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

@@ -35,9 +35,47 @@ export default function App() {
   const [pathQuery, setPathQuery] = useState('');
   const [extQuery, setExtQuery] = useState('');
 
+  // Persistent Engine Calibration parameters
+  const [similarityThreshold, setSimilarityThreshold] = useState<number>(() => {
+    const saved = localStorage.getItem('ecysearch_similarityThreshold');
+    return saved ? parseFloat(saved) : 0.10;
+  });
+  const [pathBoost, setPathBoost] = useState<number>(() => {
+    const saved = localStorage.getItem('ecysearch_pathBoost');
+    return saved ? parseFloat(saved) : 0.25;
+  });
+  const [k1, setK1] = useState<number>(() => {
+    const saved = localStorage.getItem('ecysearch_k1');
+    return saved ? parseFloat(saved) : 1.20;
+  });
+  const [b, setB] = useState<number>(() => {
+    const saved = localStorage.getItem('ecysearch_b');
+    return saved ? parseFloat(saved) : 0.75;
+  });
+  const [maxLineLength, setMaxLineLength] = useState<number>(() => {
+    const saved = localStorage.getItem('ecysearch_maxLineLength');
+    return saved ? parseInt(saved, 10) : 350;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('ecysearch_similarityThreshold', String(similarityThreshold));
+  }, [similarityThreshold]);
+  useEffect(() => {
+    localStorage.setItem('ecysearch_pathBoost', String(pathBoost));
+  }, [pathBoost]);
+  useEffect(() => {
+    localStorage.setItem('ecysearch_k1', String(k1));
+  }, [k1]);
+  useEffect(() => {
+    localStorage.setItem('ecysearch_b', String(b));
+  }, [b]);
+  useEffect(() => {
+    localStorage.setItem('ecysearch_maxLineLength', String(maxLineLength));
+  }, [maxLineLength]);
+
   // Active inputs states
   const [q, setQ] = useState('');
-  const [mode, setMode] = useState<'mirror' | 'live'>('mirror');
+  const [mode, setMode] = useState<'mirror' | 'live' | 'semantic'>('mirror');
   const [regex, setRegex] = useState(false);
   const [word, setWord] = useState(false);
   const [caseSensitive, setCaseSensitive] = useState(false);
@@ -151,7 +189,12 @@ export default function App() {
         accounts: selectedAccounts,
         repos: selectedRepos,
         path: pathQuery || undefined,
-        ext: extQuery || undefined
+        ext: extQuery || undefined,
+        similarityThreshold,
+        pathBoost,
+        k1,
+        b,
+        maxLineLength
       });
       setSearchResponse(res);
     } catch (err: any) {
@@ -189,7 +232,7 @@ export default function App() {
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [q, mode, regex, word, caseSensitive, fold, selectedAccounts, selectedRepos, pathQuery, extQuery]);
+  }, [q, mode, regex, word, caseSensitive, fold, selectedAccounts, selectedRepos, pathQuery, extQuery, similarityThreshold, pathBoost, k1, b, maxLineLength]);
 
   const handleSelectHistoryQuery = (query: string, config?: any) => {
     setQ(query);
@@ -247,6 +290,16 @@ export default function App() {
           setPathQuery={setPathQuery}
           extQuery={extQuery}
           setExtQuery={setExtQuery}
+          similarityThreshold={similarityThreshold}
+          setSimilarityThreshold={setSimilarityThreshold}
+          pathBoost={pathBoost}
+          setPathBoost={setPathBoost}
+          k1={k1}
+          setK1={setK1}
+          b={b}
+          setB={setB}
+          maxLineLength={maxLineLength}
+          setMaxLineLength={setMaxLineLength}
         />
 
         {/* Results matching code loops */}
@@ -264,6 +317,7 @@ export default function App() {
         {/* Sync panel right drawer toggler */}
         <SyncPanel 
           status={syncStatus} 
+          cachedRepos={repos}
           onRefresh={loadWorkspaceData} 
           isOpen={isSyncPanelOpen} 
           onClose={() => setIsSyncPanelOpen(false)} 
