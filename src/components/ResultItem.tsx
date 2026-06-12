@@ -11,7 +11,11 @@ interface ResultItemProps {
 }
 
 export default function ResultItem({ match, isExpanded, toggleExpand, q }: ResultItemProps) {
-  const lineUrl = `https://github.com/${match.owner}/${match.repo}/blob/default/${match.path}#L${match.lineNumber}`;
+  // blob/HEAD resolves to the default branch on github.com, so no branch
+  // plumbing is needed. Live-mode fragments have no line number → no anchor.
+  const lineUrl = match.lineNumber !== null
+    ? `https://github.com/${match.owner}/${match.repo}/blob/HEAD/${match.path}#L${match.lineNumber}`
+    : `https://github.com/${match.owner}/${match.repo}/blob/HEAD/${match.path}`;
 
   const copyPathToClipboard = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -23,18 +27,24 @@ export default function ResultItem({ match, isExpanded, toggleExpand, q }: Resul
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
         {/* file path and line number */}
         <div className="flex items-center gap-2 truncate">
-          <span className="text-[#4F8CFF] font-semibold">L{match.lineNumber}</span>
+          {match.lineNumber !== null ? (
+            <span className="text-[#4F8CFF] font-semibold">L{match.lineNumber}</span>
+          ) : (
+            <span className="bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded text-[9px] uppercase" title="Live fragments carry no line number">
+              fragment
+            </span>
+          )}
           <span className="text-gray-500">in</span>
           <span className="text-[#E3E3E3] font-medium truncate" title={match.path}>
             {match.path}
           </span>
-          
+
           <button
             onClick={copyPathToClipboard}
-            className="text-gray-550 hover:text-white p-1 rounded hover:bg-zinc-805"
+            className="text-gray-500 hover:text-white p-1 rounded hover:bg-zinc-800"
             title="Copy path to clipboard"
           >
-            <Copy className="un-icon w-3 h-3" />
+            <Copy className="w-3 h-3" />
           </button>
         </div>
 
@@ -64,21 +74,21 @@ export default function ResultItem({ match, isExpanded, toggleExpand, q }: Resul
 
       {/* MATCHED LINES WITH HIGHLIGHTING */}
       <div className="bg-[#0F1115] p-2.5 rounded border border-[#2A2C2E] overflow-x-auto select-all whitespace-pre text-[#C0C0C0]">
-        {isExpanded && match.before && (
+        {isExpanded && match.before && match.lineNumber !== null && (
           <div className="flex gap-4 select-none opacity-50 hover:opacity-100 transition-opacity">
-            <span className="w-6 text-right select-none text-zinc-750">{match.lineNumber - 1}</span>
+            <span className="w-6 text-right select-none text-zinc-700">{match.lineNumber - 1}</span>
             <HighlightedLine text={match.before} ranges={[]} />
           </div>
         )}
 
         <div className="flex gap-4">
-          <span className="w-6 text-right select-none text-[#4F8CFF] font-semibold">{match.lineNumber}</span>
+          <span className="w-6 text-right select-none text-[#4F8CFF] font-semibold">{match.lineNumber ?? '·'}</span>
           <HighlightedLine text={match.line} ranges={match.matchRanges} />
         </div>
 
-        {isExpanded && match.after && (
+        {isExpanded && match.after && match.lineNumber !== null && (
           <div className="flex gap-4 select-none opacity-50 hover:opacity-100 transition-opacity">
-            <span className="w-6 text-right select-none text-zinc-750">{match.lineNumber + 1}</span>
+            <span className="w-6 text-right select-none text-zinc-700">{match.lineNumber + 1}</span>
             <HighlightedLine text={match.after} ranges={[]} />
           </div>
         )}
@@ -99,7 +109,7 @@ function HighlightedLine({ text, ranges }: { text: string; ranges: MatchRange[] 
     const items: React.ReactNode[] = [];
     let matchIdx = 0;
     let m;
-    
+
     while ((m = tokenRegex.exec(str)) !== null) {
       const val = m[0];
       if (!val) continue;
@@ -130,20 +140,17 @@ function HighlightedLine({ text, ranges }: { text: string; ranges: MatchRange[] 
   const elements: React.ReactNode[] = [];
   let lastIndex = 0;
 
-  // Sort ranges to process sequentially
   const sortedRanges = [...ranges].sort((a, b) => a.start - b.start);
 
   sortedRanges.forEach((range, i) => {
-    // Normal text segment
     if (range.start > lastIndex) {
       const rawSegment = text.substring(lastIndex, range.start);
       elements.push(...tokenizeLine(rawSegment, `seg-${i}`));
     }
-    // Highlighted match section with elegant neon blue underlined style
     const end = range.start + range.length;
     elements.push(
-      <mark 
-        key={`match-${i}`} 
+      <mark
+        key={`match-${i}`}
         className="bg-[#4F8CFF]/20 text-[#D2E3FC] border-b-2 border-[#4F8CFF] px-0.5 font-bold"
       >
         {text.substring(range.start, end)}
@@ -152,7 +159,6 @@ function HighlightedLine({ text, ranges }: { text: string; ranges: MatchRange[] 
     lastIndex = end;
   });
 
-  // Remainder segment
   if (lastIndex < text.length) {
     const rawEnd = text.substring(lastIndex);
     elements.push(...tokenizeLine(rawEnd, 'seg-end'));

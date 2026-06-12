@@ -19,7 +19,7 @@ interface SearchBarProps {
   openDoctor: () => void;
   isSyncing: boolean;
   toggleSyncPanel: () => void;
-  openTelemetry: () => void;
+  openSystem: () => void;
 }
 
 export default function SearchBar({
@@ -40,7 +40,7 @@ export default function SearchBar({
   openDoctor,
   isSyncing,
   toggleSyncPanel,
-  openTelemetry
+  openSystem
 }: SearchBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -187,12 +187,12 @@ export default function SearchBar({
 
         {/* Doctor & Sync Buttons */}
         <button
-          onClick={openTelemetry}
+          onClick={openSystem}
           className="bg-[#0F1115] hover:text-[#4F8CFF] border border-[#2A2C2E] px-3 py-1.5 rounded flex items-center gap-1.5 text-xs transition-colors font-semibold text-[#E3E3E3]"
-          title="Open M4 High-Performance Telemetry Logs"
+          title="System metrics, search history and the found-words notebook"
         >
           <Cpu className="w-3.5 h-3.5 text-[#4F8CFF]" />
-          <span>M4 Telemetry</span>
+          <span>System</span>
         </button>
 
         <button

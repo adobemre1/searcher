@@ -211,6 +211,12 @@ function StatusBadge({ status }: { status: RepoInfo['status'] }) {
     style = 'bg-zinc-800 text-emerald-500 border border-zinc-750';
   } else if (status === 'skipped-empty') {
     style = 'bg-zinc-900 text-gray-500 border border-zinc-800';
+  } else if (status === 'skipped-demo') {
+    // demo mode: repo larger than the tokenless 10 MB cap
+    style = 'bg-amber-950/60 text-amber-500 border border-amber-900';
+  } else if (status === 'deferred') {
+    // rate-limited: sync will pick it up on the next run
+    style = 'bg-sky-950 text-sky-400 border border-sky-900';
   }
 
   return (

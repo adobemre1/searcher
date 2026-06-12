@@ -111,7 +111,7 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
             <div className="flex gap-2.5 items-start">
               <Sparkles className="w-4.5 h-4.5 text-[#4F8CFF] shrink-0 mt-0.5 animate-pulse" />
               <div className="space-y-1">
-                <span className="block text-[10px] text-gray-400 font-mono uppercase tracking-wider font-bold">Genesis Quantum Code Semantic Insight</span>
+                <span className="block text-[10px] text-gray-400 font-mono uppercase tracking-wider font-bold">Local semantic ranking (offline, 0 tokens)</span>
                 <p className="text-xs text-gray-200 font-sans leading-relaxed select-text">{explanation}</p>
               </div>
             </div>
@@ -129,7 +129,7 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
               {pathMatches.map((pm, i) => (
                 <a
                   key={i}
-                  href={`https://github.com/${pm.owner}/${pm.repo}/blob/default/${pm.path}`}
+                  href={`https://github.com/${pm.owner}/${pm.repo}/blob/HEAD/${pm.path}`}
                   target="_blank"
                   referrerPolicy="no-referrer"
                   className="p-2 bg-[#0F1115] border border-zinc-850 rounded hover:border-[#4F8CFF] flex flex-col text-[#E3E3E3] hover:text-white transition-colors"
@@ -165,21 +165,23 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
 
             {/* Matching Rows */}
             <div className="divide-y divide-zinc-850">
-              {fileMatches.map((match, idx) => (
-                <ResultItem 
-                  key={idx} 
-                  match={match} 
-                  isExpanded={expandedFiles[`${match.path}:${match.lineNumber}`] || false}
-                  toggleExpand={() => {
-                    const id = `${match.path}:${match.lineNumber}`;
-                    setExpandedFiles({
-                      ...expandedFiles,
-                      [id]: !expandedFiles[id]
-                    });
-                  }}
-                  q={q} 
-                />
-              ))}
+              {fileMatches.map((match, idx) => {
+                const id = `${match.path}:${match.lineNumber ?? `f${idx}`}`;
+                return (
+                  <ResultItem
+                    key={id}
+                    match={match}
+                    isExpanded={expandedFiles[id] || false}
+                    toggleExpand={() => {
+                      setExpandedFiles({
+                        ...expandedFiles,
+                        [id]: !expandedFiles[id]
+                      });
+                    }}
+                    q={q}
+                  />
+                );
+              })}
             </div>
           </div>
         ))}

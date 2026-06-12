@@ -24,9 +24,10 @@ export interface RepoInfo {
     budget: number;
     empty: number;
   } | null;
-  status: 'queued' | 'checking' | 'downloading' | 'extracting' | 'indexed' | 'failed' | 'skipped-empty' | 'up-to-date' | 'unknown';
+  status: 'queued' | 'checking' | 'downloading' | 'extracting' | 'indexed' | 'failed' | 'skipped-empty' | 'skipped-demo' | 'deferred' | 'up-to-date' | 'unknown';
   stale: boolean;
   size?: number;
+  repoSizeKb?: number;
 }
 
 export interface SyncProgressItem {
@@ -62,7 +63,8 @@ export interface SearchResult {
   repo: string;
   path: string;
   line: string;
-  lineNumber: number;
+  // null = fragment without a known line number (live mode); links omit #L
+  lineNumber: number | null;
   before: string | null;
   after: string | null;
   matchRanges: MatchRange[];
@@ -103,6 +105,10 @@ export interface DoctorResponse {
   diagnostics: DoctorDiagnostic[];
 }
 
+// Mutating endpoints require this header: cross-origin pages cannot set
+// custom headers, which blocks drive-by (CSRF) requests against localhost.
+const INTENT_HEADERS = { 'X-Ecysearch': '1', 'Content-Type': 'application/json' };
+
 export async function getHealth(): Promise<{ ok: boolean; version: string; mode: string }> {
   const res = await fetch('/api/health');
   return res.json();
@@ -121,7 +127,7 @@ export async function getRepos(): Promise<RepoInfo[]> {
 export async function triggerSync(force = false): Promise<{ ok: boolean; message: string }> {
   const res = await fetch('/api/sync', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: INTENT_HEADERS,
     body: JSON.stringify({ force })
   });
   if (!res.ok) {
@@ -143,6 +149,19 @@ export async function getRateLimits(): Promise<RateLimits> {
 
 export async function getDoctor(): Promise<DoctorResponse> {
   const res = await fetch('/api/doctor');
+  return res.json();
+}
+
+export async function deleteRepoCache(id: string): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch('/api/repos/delete', {
+    method: 'POST',
+    headers: INTENT_HEADERS,
+    body: JSON.stringify({ id })
+  });
+  if (!res.ok) {
+    const errorPayload = await res.json();
+    throw new Error(errorPayload.error || 'Failed to purge repository index');
+  }
   return res.json();
 }
 
@@ -209,99 +228,134 @@ export async function search(params: SearchParams): Promise<SearchResponse> {
   return res.json();
 }
 
-export interface SearchLog {
-  id: string;
-  timestamp: string;
-  q: string;
-  mode: 'mirror' | 'live' | 'semantic';
+// ---------------------------------------------------------------------------
+// Journal — the found-words notebook
+// ---------------------------------------------------------------------------
+
+export interface JournalFlags {
   regex: boolean;
   word: boolean;
   caseSensitive: boolean;
   fold: boolean;
-  accounts?: string[];
-  repos?: string[];
-  path?: string;
-  ext?: string;
-  tookMs: number;
-  totalFound: number;
-  resultsCount: number;
 }
 
-export interface TelemetryData {
-  cpuCoresCount: number;
-  estimatedScanRateMBps: number;
-  nodejsMemory: {
+export interface JournalEntry {
+  id: string;
+  ts: string;
+  q: string;
+  qFolded: string;
+  mode: 'mirror' | 'live' | 'semantic';
+  flags: JournalFlags;
+  filters: {
+    accounts?: string[];
+    repos?: string[];
+    path?: string;
+    ext?: string;
+  };
+  totalFound: number;
+  found: boolean;
+  tookMs: number;
+  apiCallsUsed: number;
+  repeats: number;
+}
+
+export interface WordAggregate {
+  word: string;
+  searchCount: number;
+  firstSearchedAt: string;
+  lastSearchedAt: string;
+  lastTotalFound: number;
+  everFound: boolean;
+}
+
+export interface JournalRecordOutcome {
+  recorded: boolean;
+  redacted?: boolean;
+  coalesced?: boolean;
+  reason?: string;
+}
+
+export async function recordJournal(input: {
+  q: string;
+  mode: 'mirror' | 'live' | 'semantic';
+  flags: JournalFlags;
+  filters: { accounts?: string[]; repos?: string[]; path?: string; ext?: string };
+  totalFound: number;
+  tookMs: number;
+  apiCallsUsed: number;
+}): Promise<JournalRecordOutcome> {
+  const res = await fetch('/api/journal/record', {
+    method: 'POST',
+    headers: INTENT_HEADERS,
+    body: JSON.stringify(input)
+  });
+  return res.json();
+}
+
+export async function getJournalEntries(limit = 200): Promise<JournalEntry[]> {
+  const res = await fetch(`/api/journal?limit=${limit}`);
+  return res.json();
+}
+
+export async function getJournalWords(): Promise<WordAggregate[]> {
+  const res = await fetch('/api/journal/words');
+  return res.json();
+}
+
+export async function clearJournal(): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch('/api/journal', {
+    method: 'DELETE',
+    headers: INTENT_HEADERS
+  });
+  return res.json();
+}
+
+export function journalExportUrl(format: 'md' | 'json'): string {
+  return `/api/journal/export?format=${format}`;
+}
+
+// ---------------------------------------------------------------------------
+// System metrics — measured values only
+// ---------------------------------------------------------------------------
+
+export interface SystemMetrics {
+  cpu: {
+    cores: number;
+    model: string;
+    loadavg: number[];
+  };
+  memory: {
     rss: number;
     heapUsed: number;
     heapTotal: number;
   };
-  averages: {
-    mirrorTookMs: number;
-    liveTookMs: number;
+  index: {
+    repos: number;
+    files: number;
+    lines: number;
+    shardBytes: number;
+  };
+  search: {
+    mirrorAvgMs: number;
+    semanticAvgMs: number;
+    liveAvgMs: number;
     totalSearches: number;
-    queryEntropy: number;
   };
-  coresStatus: { id: number; active: boolean; loadPercent: number }[];
-}
-
-export async function getSearchHistory(): Promise<SearchLog[]> {
-  const res = await fetch('/api/history');
-  return res.json();
-}
-
-export async function clearSearchHistory(): Promise<{ ok: boolean; message: string }> {
-  const res = await fetch('/api/history/clear', { method: 'POST' });
-  return res.json();
-}
-
-export async function getTelemetryData(): Promise<TelemetryData> {
-  const res = await fetch('/api/telemetry');
-  return res.json();
-}
-
-export async function deleteRepoCache(id: string): Promise<{ ok: boolean; message: string }> {
-  const res = await fetch('/api/repos/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id })
-  });
-  if (!res.ok) {
-    const errorPayload = await res.json();
-    throw new Error(errorPayload.error || 'Failed to purge repository index');
-  }
-  return res.json();
-}
-
-export interface BenchmarkResponse {
-  ok: boolean;
-  timestamp: string;
-  engines: {
-    typescript: {
-      matrixMultiply1000TimesTimeMs: number;
-      shannonEntropyResult: number;
-    };
-    python: {
-      available: boolean;
-      matrixMultiply1000TimesTimeMs: number | null;
-      shannonEntropyResult: number | null;
-      error: string | null;
-    };
+  journal: {
+    enabled: boolean;
+    breakerTripped: boolean;
+    entryCount: number;
+    wordCount: number;
+    redactedCount: number;
   };
-  calibration: {
-    precisionDelta: number;
-    isPrecisionVerified: boolean;
-    multiplier: number;
-    recommendation: string;
+  process: {
+    node: string;
+    platform: string;
+    uptimeSec: number;
   };
 }
 
-export async function runBenchmark(): Promise<BenchmarkResponse> {
-  const res = await fetch('/api/benchmark', { method: 'POST' });
-  if (!res.ok) {
-    const errPayload = await res.json();
-    throw new Error(errPayload.error || 'Benchmark pipeline failed');
-  }
+export async function getSystemMetrics(): Promise<SystemMetrics> {
+  const res = await fetch('/api/system');
   return res.json();
 }
-
-

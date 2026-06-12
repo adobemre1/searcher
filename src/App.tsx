@@ -4,12 +4,16 @@ import {
   getRepos,
   getSyncStatus,
   getRateLimits,
+  getSystemMetrics,
+  recordJournal,
   search,
   AccountInfo,
   RepoInfo,
   SyncStatus,
   RateLimits,
-  SearchResponse
+  SearchResponse,
+  SystemMetrics,
+  JournalEntry
 } from './api';
 
 import SearchBar from './components/SearchBar';
@@ -19,14 +23,14 @@ import SyncPanel from './components/SyncPanel';
 import StatusBar from './components/StatusBar';
 import DemoBanner from './components/DemoBanner';
 import DoctorModal from './components/DoctorModal';
-import TelemetryDrawer from './components/TelemetryDrawer';
+import SystemDrawer from './components/SystemDrawer';
 
 export default function App() {
-  // Database configuration states
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [rateLimits, setRateLimits] = useState<RateLimits | null>(null);
+  const [systemMetrics, setSystemMetrics] = useState<SystemMetrics | null>(null);
   const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
 
   // Filter controllers
@@ -35,7 +39,7 @@ export default function App() {
   const [pathQuery, setPathQuery] = useState('');
   const [extQuery, setExtQuery] = useState('');
 
-  // Persistent Engine Calibration parameters
+  // Persistent semantic Engine Calibration parameters
   const [similarityThreshold, setSimilarityThreshold] = useState<number>(() => {
     const saved = localStorage.getItem('ecysearch_similarityThreshold');
     return saved ? parseFloat(saved) : 0.10;
@@ -73,7 +77,7 @@ export default function App() {
     localStorage.setItem('ecysearch_maxLineLength', String(maxLineLength));
   }, [maxLineLength]);
 
-  // Active inputs states
+  // Active inputs
   const [q, setQ] = useState('');
   const [mode, setMode] = useState<'mirror' | 'live' | 'semantic'>('mirror');
   const [regex, setRegex] = useState(false);
@@ -89,11 +93,14 @@ export default function App() {
   // Layout UI states
   const [isSyncPanelOpen, setIsSyncPanelOpen] = useState(false);
   const [isDoctorOpen, setIsDoctorOpen] = useState(false);
-  const [isTelemetryOpen, setIsTelemetryOpen] = useState(false);
+  const [isSystemOpen, setIsSystemOpen] = useState(false);
 
-  const searchTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qRef = useRef(q);
+  qRef.current = q;
+  const [rerunNonce, setRerunNonce] = useState(0);
 
-  // Load baseline statistics on mount (M1, M3)
   const loadWorkspaceData = async () => {
     try {
       const [accs, repositories, rates, sync] = await Promise.all([
@@ -107,27 +114,27 @@ export default function App() {
       setRateLimits(rates);
       setSyncStatus(sync);
 
-      // Pre-select both search accounts by default
       if (accs.length > 0 && selectedAccounts.length === 0) {
         setSelectedAccounts(accs.map(a => a.login));
       }
     } catch (err) {
-      console.error('Failed to load initial workspace logs:', err);
+      console.error('Failed to load initial workspace data:', err);
     }
   };
 
   useEffect(() => {
     loadWorkspaceData();
-    
-    // Periodically update rate limits on the bottom bar every 15 seconds
+    getSystemMetrics().then(setSystemMetrics).catch(() => {});
+
+    // Refresh gauges every 15s
     const rateTimer = setInterval(async () => {
       try {
-        const rates = await getRateLimits();
+        const [rates, sys] = await Promise.all([getRateLimits(), getSystemMetrics()]);
         setRateLimits(rates);
+        setSystemMetrics(sys);
       } catch {}
     }, 15000);
 
-    // Track online state
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
@@ -140,25 +147,24 @@ export default function App() {
     };
   }, []);
 
-  // Poll synchronization progress status if sync is actively running
+  // Poll sync progress while a sync runs
   useEffect(() => {
-    let pollInterval: NodeJS.Timeout | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     if (syncStatus?.active) {
       pollInterval = setInterval(async () => {
         try {
           const status = await getSyncStatus();
           setSyncStatus(status);
-          
+
           if (!status.active) {
-            // Reload accounts list and repos lines counts when synchronization completed
             const reposList = await getRepos();
             setRepos(reposList);
             const rates = await getRateLimits();
             setRateLimits(rates);
           }
         } catch (err) {
-          console.error('Failed to poll sync states:', err);
+          console.error('Failed to poll sync state:', err);
         }
       }, 1500);
     }
@@ -168,38 +174,86 @@ export default function App() {
     };
   }, [syncStatus?.active]);
 
-  // Handle live search triggers and debounced inputs for mirror searches (MODE_QUANTUM_EFFICIENCY)
-  const triggerSearch = async () => {
+  const buildParams = () => ({
+    q,
+    mode,
+    regex,
+    word,
+    caseSensitive,
+    fold,
+    accounts: selectedAccounts,
+    repos: selectedRepos,
+    path: pathQuery || undefined,
+    ext: extQuery || undefined,
+    similarityThreshold,
+    pathBoost,
+    k1,
+    b,
+    maxLineLength
+  });
+
+  /**
+   * Journal a committed search. Fire-and-forget: a journal failure never
+   * affects the search UX. The server additionally skips q.length < 3 and
+   * secret-shaped queries.
+   */
+  const journalSearch = (params: ReturnType<typeof buildParams>, res: SearchResponse) => {
+    recordJournal({
+      q: params.q,
+      mode: params.mode,
+      flags: {
+        regex: params.regex,
+        word: params.word,
+        caseSensitive: params.caseSensitive,
+        fold: params.fold
+      },
+      filters: {
+        accounts: params.accounts,
+        repos: params.repos,
+        path: params.path,
+        ext: params.ext
+      },
+      totalFound: res.totalFound,
+      tookMs: res.tookMs,
+      apiCallsUsed: res.apiCallsUsed
+    }).catch(() => {});
+  };
+
+  /**
+   * commit=true → Enter / rerun: record in the journal immediately.
+   * commit=false → debounced live typing: only record if the query then sits
+   * unchanged for ≥ 1.5 s (the "settled" rule keeps prefix noise out).
+   */
+  const triggerSearch = async (opts: { commit?: boolean } = {}) => {
     if (!q.trim()) {
       setSearchResponse(null);
       setSearchError(null);
       return;
     }
 
+    const params = buildParams();
     setIsSearching(true);
     setSearchError(null);
     try {
-      const res = await search({
-        q,
-        mode,
-        regex,
-        word,
-        caseSensitive,
-        fold,
-        accounts: selectedAccounts,
-        repos: selectedRepos,
-        path: pathQuery || undefined,
-        ext: extQuery || undefined,
-        similarityThreshold,
-        pathBoost,
-        k1,
-        b,
-        maxLineLength
-      });
+      const res = await search(params);
       setSearchResponse(res);
+
+      if (dwellTimerRef.current) {
+        clearTimeout(dwellTimerRef.current);
+        dwellTimerRef.current = null;
+      }
+
+      if (opts.commit) {
+        journalSearch(params, res);
+      } else {
+        dwellTimerRef.current = setTimeout(() => {
+          if (qRef.current === params.q) {
+            journalSearch(params, res);
+          }
+        }, 1500);
+      }
     } catch (err: any) {
       setSearchError(err?.message || 'Search execution failed');
-      // Render clean feedback error
       setSearchResponse({
         results: [],
         pathMatches: [],
@@ -213,18 +267,17 @@ export default function App() {
     }
   };
 
-  // Trigger search dynamically when options or inputs shift (with debounce for mirror queries)
+  // Debounced auto-search for the free local modes (mirror + semantic).
+  // Live mode fires on Enter only to protect the 10 req/min budget.
   useEffect(() => {
     if (searchTimerRef.current) {
       clearTimeout(searchTimerRef.current);
     }
 
     if (mode === 'live') {
-      // In live proxy mode: wait for explicit user search submission/enter click to avoid accidental spam
       return;
     }
 
-    // Debounce search input for free mirror searches to keep rendering fluid
     searchTimerRef.current = setTimeout(() => {
       triggerSearch();
     }, 300);
@@ -234,52 +287,60 @@ export default function App() {
     };
   }, [q, mode, regex, word, caseSensitive, fold, selectedAccounts, selectedRepos, pathQuery, extQuery, similarityThreshold, pathBoost, k1, b, maxLineLength]);
 
-  const handleSelectHistoryQuery = (query: string, config?: any) => {
-    setQ(query);
-    if (config) {
-      if (config.mode) setMode(config.mode);
-      if (config.regex !== undefined) setRegex(config.regex);
-      if (config.word !== undefined) setWord(config.word);
-      if (config.caseSensitive !== undefined) setCaseSensitive(config.caseSensitive);
-      if (config.fold !== undefined) setFold(config.fold);
-      if (config.path !== undefined) setPathQuery(config.path || '');
-      if (config.ext !== undefined) setExtQuery(config.ext || '');
-      if (config.accounts && config.accounts.length > 0) setSelectedAccounts(config.accounts);
-      if (config.repos && config.repos.length > 0) setSelectedRepos(config.repos);
+  // Rerun requested from the notebook: state is set first, then the nonce
+  // effect fires the search (works for live mode too, which has no debounce).
+  useEffect(() => {
+    if (rerunNonce > 0) {
+      triggerSearch({ commit: true });
     }
-    setIsTelemetryOpen(false);
+  }, [rerunNonce]);
+
+  const handleSelectJournalQuery = (query: string, config?: Partial<Pick<JournalEntry, 'mode' | 'flags' | 'filters'>>) => {
+    setQ(query);
+    if (config?.mode) setMode(config.mode);
+    if (config?.flags) {
+      setRegex(!!config.flags.regex);
+      setWord(!!config.flags.word);
+      setCaseSensitive(!!config.flags.caseSensitive);
+      setFold(config.flags.fold !== false);
+    }
+    if (config?.filters) {
+      setPathQuery(config.filters.path || '');
+      setExtQuery(config.filters.ext || '');
+      if (config.filters.accounts && config.filters.accounts.length > 0) setSelectedAccounts(config.filters.accounts);
+      if (config.filters.repos && config.filters.repos.length > 0) setSelectedRepos(config.filters.repos);
+    }
+    setIsSystemOpen(false);
+    setRerunNonce(n => n + 1);
   };
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-[#0F1115] text-[#E3E3E3] font-sans">
-      {/* Amber Demo Disclaimer strip if tokens are missing */}
       <DemoBanner accounts={accounts} />
 
-      {/* Top Search inputs Bar and Mode Selects */}
-      <SearchBar 
-        q={q} 
-        setQ={setQ} 
-        mode={mode} 
-        setMode={setMode} 
-        regex={regex} 
+      <SearchBar
+        q={q}
+        setQ={setQ}
+        mode={mode}
+        setMode={setMode}
+        regex={regex}
         setRegex={setRegex}
-        word={word} 
-        setWord={setWord} 
-        caseSensitive={caseSensitive} 
-        setCaseSensitive={setCaseSensitive} 
-        fold={fold} 
-        setFold={setFold} 
-        onSearchTrigger={triggerSearch}
+        word={word}
+        setWord={setWord}
+        caseSensitive={caseSensitive}
+        setCaseSensitive={setCaseSensitive}
+        fold={fold}
+        setFold={setFold}
+        onSearchTrigger={() => triggerSearch({ commit: true })}
         isSearching={isSearching}
         openDoctor={() => setIsDoctorOpen(true)}
         isSyncing={syncStatus?.active || false}
         toggleSyncPanel={() => setIsSyncPanelOpen(!isSyncPanelOpen)}
-        openTelemetry={() => setIsTelemetryOpen(true)}
+        openSystem={() => setIsSystemOpen(true)}
       />
 
-      {/* Main body of layout split into Filters sidebar and results panel */}
       <div className="flex flex-1 overflow-hidden relative">
-        <Filters 
+        <Filters
           accounts={accounts}
           repos={repos}
           selectedAccounts={selectedAccounts}
@@ -302,44 +363,41 @@ export default function App() {
           setMaxLineLength={setMaxLineLength}
         />
 
-        {/* Results matching code loops */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {searchError && (
             <div className="bg-red-950/40 border-b border-red-900/50 p-3 text-red-400 font-mono text-xs flex justify-between items-center shrink-0 leading-relaxed select-text">
               <span><strong>Search Error:</strong> {searchError}</span>
-              <button onClick={() => setSearchError(null)} className="text-gray-550 hover:text-white px-1 font-sans">✕</button>
+              <button onClick={() => setSearchError(null)} className="text-gray-500 hover:text-white px-1 font-sans">✕</button>
             </div>
           )}
-          
+
           <ResultList response={searchResponse} isSearching={isSearching} q={q} />
         </div>
 
-        {/* Sync panel right drawer toggler */}
-        <SyncPanel 
-          status={syncStatus} 
+        <SyncPanel
+          status={syncStatus}
           cachedRepos={repos}
-          onRefresh={loadWorkspaceData} 
-          isOpen={isSyncPanelOpen} 
-          onClose={() => setIsSyncPanelOpen(false)} 
+          onRefresh={loadWorkspaceData}
+          isOpen={isSyncPanelOpen}
+          onClose={() => setIsSyncPanelOpen(false)}
         />
       </div>
 
-      {/* System diagnostics Doctor modal */}
       <DoctorModal isOpen={isDoctorOpen} onClose={() => setIsDoctorOpen(false)} />
 
-      {/* High-fidelity Telemetry & Search trace audit logs */}
-      <TelemetryDrawer 
-        isOpen={isTelemetryOpen} 
-        onClose={() => setIsTelemetryOpen(false)} 
-        onSelectQuery={handleSelectHistoryQuery} 
+      <SystemDrawer
+        isOpen={isSystemOpen}
+        onClose={() => setIsSystemOpen(false)}
+        onSelectQuery={handleSelectJournalQuery}
       />
 
-      {/* Footer statistics gauges */}
-      <StatusBar 
-        limits={rateLimits} 
-        repos={repos} 
-        isSearching={isSearching} 
-        isOnline={isOnline} 
+      <StatusBar
+        limits={rateLimits}
+        repos={repos}
+        isSearching={isSearching}
+        isOnline={isOnline}
+        journal={systemMetrics?.journal || null}
+        onOpenNotebook={() => setIsSystemOpen(true)}
       />
     </div>
   );
