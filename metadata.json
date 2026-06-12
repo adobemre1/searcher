@@ -1,0 +1,6 @@
+{
+  "name": "ecysearch",
+  "description": "Zero-Token, Zero-Cost GitHub Keyword Searcher (Local-First, macOS E2E)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
