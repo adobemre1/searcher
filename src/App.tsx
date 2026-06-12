@@ -84,6 +84,7 @@ export default function App() {
   const [word, setWord] = useState(false);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [fold, setFold] = useState(true);
+  const [liveScope, setLiveScope] = useState<'configured' | 'global'>('configured');
 
   // Status indicators
   const [isSearching, setIsSearching] = useState(false);
@@ -189,7 +190,8 @@ export default function App() {
     pathBoost,
     k1,
     b,
-    maxLineLength
+    maxLineLength,
+    liveScope
   });
 
   /**
@@ -285,7 +287,7 @@ export default function App() {
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [q, mode, regex, word, caseSensitive, fold, selectedAccounts, selectedRepos, pathQuery, extQuery, similarityThreshold, pathBoost, k1, b, maxLineLength]);
+  }, [q, mode, regex, word, caseSensitive, fold, liveScope, selectedAccounts, selectedRepos, pathQuery, extQuery, similarityThreshold, pathBoost, k1, b, maxLineLength]);
 
   // Rerun requested from the notebook: state is set first, then the nonce
   // effect fires the search (works for live mode too, which has no debounce).
@@ -331,6 +333,8 @@ export default function App() {
         setCaseSensitive={setCaseSensitive}
         fold={fold}
         setFold={setFold}
+        liveScope={liveScope}
+        setLiveScope={setLiveScope}
         onSearchTrigger={() => triggerSearch({ commit: true })}
         isSearching={isSearching}
         openDoctor={() => setIsDoctorOpen(true)}
@@ -361,6 +365,7 @@ export default function App() {
           setB={setB}
           maxLineLength={maxLineLength}
           setMaxLineLength={setMaxLineLength}
+          onExternalChange={loadWorkspaceData}
         />
 
         <div className="flex-1 flex flex-col overflow-hidden">

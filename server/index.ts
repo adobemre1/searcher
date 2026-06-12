@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 // dotenv must load before config reads process.env (HOST/PORT/JOURNAL_ENABLED)
 dotenv.config({ path: ['.env.local', '.env'] });
 
-const { HOST, PORT, ACCOUNTS, INDEX_DIR } = await import('./config.js');
+const { HOST, PORT, ACCOUNTS, INDEX_DIR, shardFileName } = await import('./config.js');
 const {
   getTokenForAccount,
   getRateLimits,
@@ -18,8 +18,10 @@ const {
   loadRepoRegistry,
   checkStaleness,
   runFullSync,
+  syncSingleExternal,
   ensureDirs
 } = await import('./sync.js');
+const { listExternal, addExternal, removeExternal, normalizeRepoId } = await import('./external.js');
 const {
   searchMirror,
   loadIndexIntoMemory,
@@ -144,14 +146,8 @@ app.post('/api/repos/delete', requireIntentHeader, async (req, res) => {
 
   try {
     const [owner, name] = repoId.split('/');
-    // Shards are written per sync-account login; the file may be keyed by
-    // either account, so match on the repo name suffix.
-    const candidates = fs.existsSync(INDEX_DIR)
-      ? fs.readdirSync(INDEX_DIR).filter(f => f.endsWith(`__${name}.json.gz`))
-      : [];
-    for (const f of candidates) {
-      fs.unlinkSync(path.join(INDEX_DIR, f));
-    }
+    const shardPath = path.join(INDEX_DIR, shardFileName(owner, name));
+    if (fs.existsSync(shardPath)) fs.unlinkSync(shardPath);
 
     delete globalRepoRegistry[repoId];
     if (globalSyncStatus.repos[repoId]) {
@@ -216,11 +212,13 @@ app.get('/api/search', async (req, res) => {
 
   try {
     if (mode === 'live') {
+      const scope = req.query.scope === 'global' ? 'global' : 'configured';
       const liveResult = await searchLiveOnGitHub({
         q,
         accounts,
         repos,
-        limit: limitVal || 50
+        limit: limitVal || 50,
+        scope
       });
       return res.json(liveResult);
     }
@@ -298,6 +296,58 @@ app.get('/api/ratelimit', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ==========================================
+// EXTERNAL REPOS — search any GitHub repo beyond your own accounts
+// ==========================================
+
+app.get('/api/external', (req, res) => {
+  res.json(listExternal());
+});
+
+app.post('/api/external/add', requireIntentHeader, async (req, res) => {
+  const repoId = normalizeRepoId(String(req.body?.repo || ''));
+  if (!repoId) {
+    return res.status(400).json({ error: 'Expected "owner/repo" (or a github.com URL).' });
+  }
+  if (globalSyncStatus.active) {
+    // Persist now; the running sync (or the next one) will index it.
+    await addExternal(repoId);
+    return res.status(202).json({ ok: true, repo: repoId, queued: true, message: 'Added; will index after the current sync.' });
+  }
+  const added = await addExternal(repoId);
+  if (!added.ok) {
+    return res.status(400).json({ error: added.error || 'Could not add repository.' });
+  }
+  const synced = await syncSingleExternal(repoId);
+  if (!synced.ok) {
+    // Keep it tracked (the user can retry sync), but report the reason.
+    return res.status(200).json({ ok: true, repo: repoId, indexed: false, warning: synced.error });
+  }
+  res.json({ ok: true, repo: repoId, indexed: true });
+});
+
+app.post('/api/external/remove', requireIntentHeader, async (req, res) => {
+  const repoId = String(req.body?.repo || '').trim();
+  if (!repoId || !repoId.includes('/')) {
+    return res.status(400).json({ error: 'Expected "owner/repo".' });
+  }
+  await removeExternal(repoId);
+
+  // Drop its shard + registry entry so it disappears from the mirror.
+  try {
+    const [owner, name] = repoId.split('/');
+    const shardPath = path.join(INDEX_DIR, shardFileName(owner, name));
+    if (fs.existsSync(shardPath)) fs.unlinkSync(shardPath);
+    delete globalRepoRegistry[repoId];
+    if (globalSyncStatus.repos[repoId]) delete globalSyncStatus.repos[repoId];
+    reloadIndex();
+  } catch (err: any) {
+    return res.status(200).json({ ok: true, repo: repoId, warning: err?.message });
+  }
+
+  res.json({ ok: true, repo: repoId });
 });
 
 // ==========================================

@@ -3,10 +3,16 @@ import path from 'path';
 import zlib from 'zlib';
 import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
-import { INDEX_DIR, REGEX_MAX_PATTERN_LENGTH, REGEX_TIMEOUT_MS } from './config.js';
+import { INDEX_DIR, ACCOUNTS, REGEX_MAX_PATTERN_LENGTH, REGEX_TIMEOUT_MS } from './config.js';
 import { foldTurkish } from './fold.js';
 import { maskSecrets } from './mask.js';
 import { globalRepoRegistry } from './sync.js';
+
+// Owners that belong to the configured accounts. The account checkbox filter
+// only governs these; external repos (any other owner) are exempt and are
+// controlled solely by the repo filter — so adding an external repo makes it
+// searchable without unchecking your own accounts.
+const CONFIGURED_OWNERS = new Set(ACCOUNTS.map(a => a.login.toLowerCase()));
 
 export interface IndexedFile {
   owner: string;
@@ -242,7 +248,7 @@ async function runRegexInWorker(params: {
   pattern: string;
   flags: string;
   plane: 'raw' | 'lower' | 'folded';
-  filters: { accounts?: string[]; repos?: string[]; pathQuery?: string; ext?: string };
+  filters: { accounts?: string[]; repos?: string[]; pathQuery?: string; ext?: string; configuredOwners?: string[] };
   limit: number;
 }): Promise<WorkerSearchOk> {
   const id = ++workerSeq;
@@ -335,7 +341,8 @@ export async function searchMirror(params: {
         accounts: params.accounts,
         repos: params.repos,
         pathQuery: params.pathQuery,
-        ext: params.ext
+        ext: params.ext,
+        configuredOwners: [...CONFIGURED_OWNERS]
       },
       limit
     }).catch((err: Error) => {
@@ -457,7 +464,9 @@ export async function searchMirror(params: {
   for (const file of memoryIndex) {
     const key = `${file.owner}/${file.repo}`;
 
-    if (accountFilter && !accountFilter.has(file.owner)) continue;
+    // Account filter only constrains configured-account owners; external repos
+    // are exempt (governed by the repo filter alone).
+    if (accountFilter && CONFIGURED_OWNERS.has(file.owner.toLowerCase()) && !accountFilter.has(file.owner)) continue;
     if (repoFilter && !repoFilter.has(key)) continue;
     if (pathRegex && !pathRegex.test(file.path)) continue;
     if (extFilter) {

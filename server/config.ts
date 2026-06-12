@@ -17,6 +17,17 @@ export const PORT = Number(process.env.PORT) || 3000;
 
 export const JOURNAL_ENABLED = process.env.JOURNAL_ENABLED !== 'false';
 
+// Shard/zip filenames are derived from owner/repo, which for external repos is
+// user input. Collapse anything outside the safe set so the value can never
+// contain a path separator or traversal segment before it reaches path.join.
+export function safeRepoSegment(s: string): string {
+  return (s || '').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+export function shardFileName(owner: string, repo: string): string {
+  return `${safeRepoSegment(owner)}__${safeRepoSegment(repo)}.json.gz`;
+}
+
 export const CACHE_DIR = path.join(process.cwd(), '.cache');
 export const INDEX_DIR = path.join(CACHE_DIR, 'index');
 export const TMP_DIR = path.join(CACHE_DIR, 'tmp');

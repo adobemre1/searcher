@@ -28,6 +28,7 @@ export interface RepoInfo {
   stale: boolean;
   size?: number;
   repoSizeKb?: number;
+  external?: boolean;
 }
 
 export interface SyncProgressItem {
@@ -181,6 +182,7 @@ export interface SearchParams {
   k1?: number;
   b?: number;
   maxLineLength?: number;
+  liveScope?: 'configured' | 'global';
 }
 
 export async function search(params: SearchParams): Promise<SearchResponse> {
@@ -218,6 +220,9 @@ export async function search(params: SearchParams): Promise<SearchResponse> {
   }
   if (params.maxLineLength !== undefined) {
     urlParams.set('maxLineLength', String(params.maxLineLength));
+  }
+  if (params.mode === 'live' && params.liveScope) {
+    urlParams.set('scope', params.liveScope);
   }
 
   const res = await fetch(`/api/search?${urlParams.toString()}`);
@@ -312,6 +317,37 @@ export async function clearJournal(): Promise<{ ok: boolean; message: string }> 
 
 export function journalExportUrl(format: 'md' | 'json'): string {
   return `/api/journal/export?format=${format}`;
+}
+
+// ---------------------------------------------------------------------------
+// External repositories — search any GitHub repo beyond your own accounts
+// ---------------------------------------------------------------------------
+
+export async function getExternalRepos(): Promise<string[]> {
+  const res = await fetch('/api/external');
+  return res.json();
+}
+
+export async function addExternalRepo(repo: string): Promise<{ ok: boolean; repo?: string; indexed?: boolean; queued?: boolean; warning?: string; error?: string }> {
+  const res = await fetch('/api/external/add', {
+    method: 'POST',
+    headers: INTENT_HEADERS,
+    body: JSON.stringify({ repo })
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || 'Failed to add repository.');
+  return body;
+}
+
+export async function removeExternalRepo(repo: string): Promise<{ ok: boolean }> {
+  const res = await fetch('/api/external/remove', {
+    method: 'POST',
+    headers: INTENT_HEADERS,
+    body: JSON.stringify({ repo })
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || 'Failed to remove repository.');
+  return body;
 }
 
 // ---------------------------------------------------------------------------

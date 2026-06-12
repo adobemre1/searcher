@@ -6,7 +6,9 @@ import {
   INDEX_DIR,
   TMP_DIR,
   ACCOUNTS,
-  DEMO_MAX_REPO_KB
+  DEMO_MAX_REPO_KB,
+  shardFileName,
+  safeRepoSegment
 } from './config.js';
 import {
   githubFetch,
@@ -19,6 +21,7 @@ import {
   extractAndParseZip,
   SkippedStats
 } from './extract.js';
+import { listExternal } from './external.js';
 
 export interface RepoSyncProgress {
   name: string;
@@ -69,6 +72,7 @@ export interface RepoRegistryEntry {
   stale: boolean;
   size?: number; // shard size on disk (bytes)
   repoSizeKb?: number; // upstream repo size (KB, from listing)
+  external?: boolean; // tracked beyond the configured accounts
 }
 
 // const + in-place mutation: consumers hold references obtained at import
@@ -87,6 +91,45 @@ export function ensureDirs() {
 
 export function hasAnyToken(): boolean {
   return ACCOUNTS.some(a => getTokenForAccount(a.login) !== null);
+}
+
+// External repos are fetched with whichever account has a token (it only
+// gates rate-limit headroom; public repos download tokenless too). Falls back
+// to the first configured login for the unauthenticated path.
+function pickAuthedLogin(): string {
+  const authed = ACCOUNTS.find(a => getTokenForAccount(a.login) !== null);
+  return authed ? authed.login : (ACCOUNTS[0]?.login || 'unauthenticated');
+}
+
+/**
+ * Resolves each tracked external "owner/repo" to a repo-meta object shaped
+ * like the listing API (owner.login, name, default_branch, private, size,
+ * pushed_at) plus a `__external` marker. Inaccessible repos surface as failed.
+ */
+async function fetchExternalMetas(): Promise<Array<{ login: string; repo: any; failed?: string }>> {
+  const externals = listExternal();
+  if (externals.length === 0) return [];
+  const login = pickAuthedLogin();
+  const out: Array<{ login: string; repo: any; failed?: string }> = [];
+
+  for (const id of externals) {
+    const [owner, name] = id.split('/');
+    try {
+      const res = await githubFetch(login, `/repos/${owner}/${name}`, { useETag: false });
+      if (res.status === 200 && res.body && res.body.owner) {
+        out.push({ login, repo: { ...res.body, __external: true } });
+      } else if (res.status === 404) {
+        out.push({ login, repo: { owner: { login: owner }, name, __external: true }, failed: 'not found or no access' });
+      } else if (res.status === 429) {
+        out.push({ login, repo: { owner: { login: owner }, name, __external: true }, failed: 'rate limited' });
+      } else {
+        out.push({ login, repo: { owner: { login: owner }, name, __external: true }, failed: `status ${res.status}` });
+      }
+    } catch (err: any) {
+      out.push({ login, repo: { owner: { login: owner }, name, __external: true }, failed: err?.message || 'fetch failed' });
+    }
+  }
+  return out;
 }
 
 /**
@@ -126,7 +169,8 @@ export function loadRepoRegistry() {
           skipped: payload.skipped || null,
           status: 'indexed',
           stale: false,
-          size: fs.statSync(shardPath).size
+          size: fs.statSync(shardPath).size,
+          external: payload.meta.external === true
         };
       } catch (err) {
         console.error(`Failed to read shard ${shard}:`, err);
@@ -156,39 +200,47 @@ export async function checkStaleness() {
 
   logSafe('Checking repository inventory and branch staleness...');
 
+  const inventory: Array<{ repo: any; external: boolean }> = [];
   for (const account of ACCOUNTS) {
     try {
       const repos = await listUserRepositories(account.login);
-
-      for (const repo of repos) {
-        const key = `${repo.owner.login}/${repo.name}`;
-        const defaultBranch = repo.default_branch || 'main';
-        const existing = globalRepoRegistry[key];
-
-        if (!existing) {
-          globalRepoRegistry[key] = {
-            name: repo.name,
-            owner: repo.owner.login,
-            private: repo.private,
-            defaultBranch,
-            pushedAt: repo.pushed_at,
-            status: 'unknown',
-            stale: true,
-            repoSizeKb: repo.size
-          };
-        } else {
-          existing.repoSizeKb = repo.size;
-          const existingPush = new Date(existing.pushedAt).getTime();
-          const remotePush = new Date(repo.pushed_at).getTime();
-
-          if (remotePush > existingPush + 1000) {
-            existing.stale = true;
-            existing.pushedAt = repo.pushed_at;
-          }
-        }
-      }
+      for (const repo of repos) inventory.push({ repo, external: false });
     } catch (err: any) {
       logSafe(`Staleness check failed for account ${account.login}: ${err?.message}`);
+    }
+  }
+  for (const ext of await fetchExternalMetas()) {
+    if (!ext.failed) inventory.push({ repo: ext.repo, external: true });
+  }
+
+  for (const { repo, external } of inventory) {
+    const key = `${repo.owner.login}/${repo.name}`;
+    const defaultBranch = repo.default_branch || 'main';
+    const existing = globalRepoRegistry[key];
+
+    if (!existing) {
+      globalRepoRegistry[key] = {
+        name: repo.name,
+        owner: repo.owner.login,
+        private: !!repo.private,
+        defaultBranch,
+        pushedAt: repo.pushed_at || new Date().toISOString(),
+        status: 'unknown',
+        stale: true,
+        repoSizeKb: repo.size,
+        external
+      };
+    } else {
+      existing.repoSizeKb = repo.size;
+      existing.external = external;
+      if (repo.pushed_at) {
+        const existingPush = new Date(existing.pushedAt).getTime();
+        const remotePush = new Date(repo.pushed_at).getTime();
+        if (remotePush > existingPush + 1000) {
+          existing.stale = true;
+          existing.pushedAt = repo.pushed_at;
+        }
+      }
     }
   }
 }
@@ -221,6 +273,25 @@ export async function runFullSync(options: { force?: boolean } = {}) {
         }
       } catch (err: any) {
         logSafe(`Failed to list repos for account ${account.login}: ${err?.message}`);
+      }
+    }
+
+    // Tracked external repositories (any owner, beyond the configured accounts)
+    for (const ext of await fetchExternalMetas()) {
+      if (ext.failed) {
+        const key = `${ext.repo.owner.login}/${ext.repo.name}`;
+        globalSyncStatus.repos[key] = {
+          name: ext.repo.name,
+          owner: ext.repo.owner.login,
+          isPrivate: false,
+          status: 'failed',
+          fileCount: 0,
+          lineCount: 0,
+          skipped: null,
+          error: ext.failed
+        };
+      } else {
+        reposToProcess.push({ login: ext.login, repo: ext.repo });
       }
     }
 
@@ -276,6 +347,58 @@ export async function runFullSync(options: { force?: boolean } = {}) {
 }
 
 /**
+ * Sync a single external repo immediately (used right after the user adds one).
+ * Honors the same mutex as a full sync to avoid concurrent index writes.
+ */
+export async function syncSingleExternal(ownerRepo: string): Promise<{ ok: boolean; error?: string }> {
+  if (globalSyncStatus.active) {
+    return { ok: false, error: 'A sync is already in progress; the repo will be picked up on the next sync.' };
+  }
+  const [owner, name] = ownerRepo.split('/');
+  if (!owner || !name) return { ok: false, error: 'Expected "owner/repo".' };
+
+  const login = pickAuthedLogin();
+  let meta: any;
+  try {
+    const res = await githubFetch(login, `/repos/${owner}/${name}`, { useETag: false });
+    if (res.status === 404) return { ok: false, error: 'Repository not found or no access.' };
+    if (res.status === 429) return { ok: false, error: 'Rate limited; try again shortly.' };
+    if (res.status !== 200 || !res.body?.owner) return { ok: false, error: `GitHub returned status ${res.status}.` };
+    meta = { ...res.body, __external: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Failed to fetch repository metadata.' };
+  }
+
+  const key = `${meta.owner.login}/${meta.name}`;
+  globalSyncStatus.active = true;
+  globalSyncStatus.startedAt = new Date().toISOString();
+  globalSyncStatus.errorMessage = null;
+  globalSyncStatus.repos[key] = {
+    name: meta.name,
+    owner: meta.owner.login,
+    isPrivate: !!meta.private,
+    status: 'queued',
+    fileCount: 0,
+    lineCount: 0,
+    skipped: null
+  };
+  globalSyncStatus.currentRepo = key;
+
+  try {
+    await syncSingleRepository(login, meta, { force: true });
+  } finally {
+    globalSyncStatus.active = false;
+    const { reloadIndex } = await import('./searchIndex.js');
+    reloadIndex();
+  }
+
+  const entry = globalRepoRegistry[key];
+  if (entry && entry.status === 'indexed') return { ok: true };
+  const prog = globalSyncStatus.repos[key];
+  return { ok: false, error: prog?.error || 'Sync did not index any files.' };
+}
+
+/**
  * Sync one repository: conditional HEAD check, zipball, extraction, shard.
  */
 async function syncSingleRepository(login: string, repo: any, options: { force?: boolean } = {}) {
@@ -283,15 +406,20 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
   const progress = globalSyncStatus.repos[key];
   if (!progress) return;
 
+  const owner = repo.owner.login;
+  const isExternal = repo.__external === true;
   const defaultBranch = repo.default_branch || 'main';
-  const shardName = `${login}__${repo.name}.json.gz`;
+  // Shard/zip names are owner-based (so any repo is unique) and sanitized
+  // (external owner/repo is user input → never a path separator/traversal).
+  const shardName = shardFileName(owner, repo.name);
   const shardPath = path.join(INDEX_DIR, shardName);
-  const zipPath = path.join(TMP_DIR, `${login}__${repo.name}.zip`);
+  const zipPath = path.join(TMP_DIR, `${safeRepoSegment(owner)}__${safeRepoSegment(repo.name)}.zip`);
 
   try {
     // Demo guard: without a token, large repos would burn the tiny budget.
+    // External repos are explicitly opted in, so they bypass the demo cap.
     const hasToken = getTokenForAccount(login) !== null;
-    if (!hasToken && typeof repo.size === 'number' && repo.size > DEMO_MAX_REPO_KB) {
+    if (!hasToken && !isExternal && typeof repo.size === 'number' && repo.size > DEMO_MAX_REPO_KB) {
       progress.status = 'skipped-demo';
       progress.error = `Repo ~${Math.round(repo.size / 1024)} MB > demo limit ${Math.round(DEMO_MAX_REPO_KB / 1024)} MB (add a PAT to sync it)`;
       logSafe(`Skipping ${key} in demo mode: ${repo.size} KB exceeds demo cap.`);
@@ -367,11 +495,12 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
       meta: {
         owner: repo.owner.login,
         repo: repo.name,
-        private: repo.private,
+        private: !!repo.private,
         defaultBranch,
         sha: upstreamSha,
-        pushedAt: repo.pushed_at,
-        syncedAt: new Date().toISOString()
+        pushedAt: repo.pushed_at || new Date().toISOString(),
+        syncedAt: new Date().toISOString(),
+        external: isExternal
       },
       files: parseResult.files,
       skipped: parseResult.skipped
@@ -395,7 +524,7 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
     globalRepoRegistry[key] = {
       name: repo.name,
       owner: repo.owner.login,
-      private: repo.private,
+      private: !!repo.private,
       defaultBranch,
       pushedAt: repo.pushed_at,
       sha: upstreamSha,
@@ -406,7 +535,8 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
       status: 'indexed',
       stale: false,
       size: compressed.length,
-      repoSizeKb: repo.size
+      repoSizeKb: repo.size,
+      external: isExternal
     };
 
     logSafe(`Indexed ${key}. Files: ${progress.fileCount}, Lines: ${progress.lineCount}`);

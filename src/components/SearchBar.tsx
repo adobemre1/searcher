@@ -14,6 +14,8 @@ interface SearchBarProps {
   setCaseSensitive: (val: boolean) => void;
   fold: boolean;
   setFold: (val: boolean) => void;
+  liveScope: 'configured' | 'global';
+  setLiveScope: (val: 'configured' | 'global') => void;
   onSearchTrigger: () => void;
   isSearching: boolean;
   openDoctor: () => void;
@@ -35,6 +37,8 @@ export default function SearchBar({
   setCaseSensitive,
   fold,
   setFold,
+  liveScope,
+  setLiveScope,
   onSearchTrigger,
   isSearching,
   openDoctor,
@@ -141,6 +145,28 @@ export default function SearchBar({
             Semantic Mode
           </button>
         </div>
+
+        {/* Live scope: My repos (user: qualifier) vs Global (all of GitHub) */}
+        {mode === 'live' && (
+          <div className="bg-[#0F1115] border border-[#2A2C2E] p-0.5 rounded flex items-center" title="Live mode scope">
+            <button
+              onClick={() => setLiveScope('configured')}
+              className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
+                liveScope === 'configured' ? 'bg-zinc-800 text-[#4F8CFF]' : 'text-gray-500 hover:text-white'
+              }`}
+            >
+              My repos
+            </button>
+            <button
+              onClick={() => setLiveScope('global')}
+              className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
+                liveScope === 'global' ? 'bg-zinc-800 text-[#4F8CFF]' : 'text-gray-500 hover:text-white'
+              }`}
+            >
+              Global
+            </button>
+          </div>
+        )}
 
         {/* Action Toggle Chips */}
         <div className="flex items-center gap-1 bg-[#0F1115] border border-[#2A2C2E] p-0.5 rounded">

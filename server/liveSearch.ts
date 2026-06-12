@@ -101,16 +101,18 @@ export async function searchLiveOnGitHub(params: {
   accounts?: string[];
   repos?: string[];
   limit?: number;
+  scope?: 'configured' | 'global';
 }): Promise<SearchResponse & { retryAfterSec?: number }> {
   const startTime = Date.now();
   const rawQuery = params.q;
   const limit = params.limit || 50;
+  const scope = params.scope || 'configured';
 
   if (!rawQuery) {
     return { results: [], pathMatches: [], totalFound: 0, truncated: false, tookMs: 0, apiCallsUsed: 0 };
   }
 
-  const cacheKey = JSON.stringify({ q: rawQuery, accounts: params.accounts, repos: params.repos });
+  const cacheKey = JSON.stringify({ q: rawQuery, accounts: params.accounts, repos: params.repos, scope });
   const cachedMatch = liveSearchCache.get(cacheKey);
   if (cachedMatch) {
     return { ...cachedMatch, tookMs: Date.now() - startTime };
@@ -138,9 +140,13 @@ export async function searchLiveOnGitHub(params: {
   let codeQuery = `${rawQuery}`;
 
   if (params.repos && params.repos.length > 0) {
+    // Explicit repo scoping always wins, regardless of global/configured.
     for (const repoName of params.repos) {
       codeQuery += ` repo:${repoName}`;
     }
+  } else if (scope === 'global') {
+    // Global: no user: qualifier → search all of GitHub's indexed code.
+    // codeQuery stays as the bare term.
   } else {
     const scopeAccounts = params.accounts && params.accounts.length > 0 ? params.accounts : configuredLogins();
     for (const acc of scopeAccounts) {

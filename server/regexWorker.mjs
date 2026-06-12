@@ -82,6 +82,8 @@ parentPort.on('message', (msg) => {
 
   const accountFilter = filters.accounts && filters.accounts.length > 0 ? new Set(filters.accounts) : null;
   const repoFilter = filters.repos && filters.repos.length > 0 ? new Set(filters.repos) : null;
+  // External owners are exempt from the account filter (see searchIndex.ts).
+  const configuredOwners = new Set((filters.configuredOwners || []).map(o => o.toLowerCase()));
   const pathNeedle = filters.pathQuery ? filters.pathQuery.toLowerCase() : null;
   const extFilter = filters.ext ? filters.ext.toLowerCase().replace(/^\./, '') : null;
 
@@ -94,7 +96,7 @@ parentPort.on('message', (msg) => {
   try {
     outer: for (const file of index) {
       const key = `${file.owner}/${file.repo}`;
-      if (accountFilter && !accountFilter.has(file.owner)) continue;
+      if (accountFilter && configuredOwners.has(file.owner.toLowerCase()) && !accountFilter.has(file.owner)) continue;
       if (repoFilter && !repoFilter.has(key)) continue;
       if (pathNeedle && !file.path.toLowerCase().includes(pathNeedle)) continue;
       if (extFilter) {

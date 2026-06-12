@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { AccountInfo, RepoInfo } from '../api';
-import { ShieldCheck, Database, FolderGit, Filter, Terminal, Sliders, RotateCcw, HelpCircle, Activity } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { AccountInfo, RepoInfo, getExternalRepos, addExternalRepo, removeExternalRepo } from '../api';
+import { ShieldCheck, Filter, Terminal, Sliders, RotateCcw, HelpCircle, Activity, Globe, Plus, X, Loader } from 'lucide-react';
 
 interface FiltersProps {
   accounts: AccountInfo[];
@@ -25,6 +25,9 @@ interface FiltersProps {
   setB: (val: number) => void;
   maxLineLength: number;
   setMaxLineLength: (val: number) => void;
+
+  // External repos changed (added/removed) → parent reloads workspace data
+  onExternalChange: () => void;
 }
 
 export default function Filters({
@@ -47,11 +50,60 @@ export default function Filters({
   b,
   setB,
   maxLineLength,
-  setMaxLineLength
+  setMaxLineLength,
+  onExternalChange
 }: FiltersProps) {
   const [isOpen, setIsOpen] = useState(true);
   const [isTunerExpanded, setIsTunerExpanded] = useState(false);
   const [showHelp, setShowHelp] = useState<string | null>(null);
+
+  // External repos
+  const [externals, setExternals] = useState<string[]>([]);
+  const [extInput, setExtInput] = useState('');
+  const [extBusy, setExtBusy] = useState(false);
+  const [extError, setExtError] = useState<string | null>(null);
+
+  const loadExternals = async () => {
+    try {
+      setExternals(await getExternalRepos());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => {
+    loadExternals();
+  }, []);
+
+  const handleAddExternal = async () => {
+    const repo = extInput.trim();
+    if (!repo) return;
+    setExtBusy(true);
+    setExtError(null);
+    try {
+      const r = await addExternalRepo(repo);
+      setExtInput('');
+      await loadExternals();
+      onExternalChange();
+      if (r.warning) setExtError(r.warning);
+    } catch (err: any) {
+      setExtError(err?.message || 'Failed to add repository.');
+    } finally {
+      setExtBusy(false);
+    }
+  };
+
+  const handleRemoveExternal = async (repo: string) => {
+    setExtBusy(true);
+    setExtError(null);
+    try {
+      await removeExternalRepo(repo);
+      await loadExternals();
+      onExternalChange();
+    } catch (err: any) {
+      setExtError(err?.message || 'Failed to remove repository.');
+    } finally {
+      setExtBusy(false);
+    }
+  };
 
   const handleAccountToggle = (login: string) => {
     if (selectedAccounts.includes(login)) {
@@ -154,6 +206,63 @@ export default function Filters({
                 </label>
               ))}
             </div>
+          </div>
+
+          {/* 1b. External repos — search ANY GitHub repo */}
+          <div>
+            <div className="text-gray-400 font-semibold mb-2 tracking-wide text-[10px] uppercase flex items-center gap-1.5">
+              <Globe className="w-3 h-3 text-[#4F8CFF]" />
+              External Repos
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={extInput}
+                onChange={e => setExtInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleAddExternal(); }}
+                placeholder="owner/repo"
+                disabled={extBusy}
+                className="flex-1 bg-[#0F1115] border border-[#2A2C2E] rounded px-2 py-1 select-text text-xs focus:outline-none focus:border-[#4F8CFF] text-[#E3E3E3] disabled:opacity-50"
+              />
+              <button
+                onClick={handleAddExternal}
+                disabled={extBusy || !extInput.trim()}
+                className="bg-[#4F8CFF] text-[#0F1115] rounded px-2 py-1 font-bold disabled:bg-zinc-800 disabled:text-gray-500 transition-colors"
+                title="Mirror and index this repository"
+              >
+                {extBusy ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            {extError && (
+              <div className="mt-1.5 text-[10px] text-amber-500 leading-snug break-words">{extError}</div>
+            )}
+            {externals.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {externals.map(repo => {
+                  const entry = repos.find(r => r.id === repo);
+                  return (
+                    <div key={repo} className="flex items-center justify-between gap-1.5 bg-[#0F1115] border border-[#2A2C2E]/60 rounded px-2 py-1 text-[11px]">
+                      <span className="font-mono text-[#E3E3E3] truncate" title={repo}>{repo}</span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="font-mono text-[9px] text-gray-500">
+                          {entry?.status === 'indexed'
+                            ? `${(entry.lineCount || 0).toLocaleString()} lines`
+                            : (entry?.status || 'pending')}
+                        </span>
+                        <button
+                          onClick={() => handleRemoveExternal(repo)}
+                          disabled={extBusy}
+                          className="text-gray-500 hover:text-red-400 transition-colors"
+                          title="Remove and drop its index"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* 2. File Ext & Paths */}
