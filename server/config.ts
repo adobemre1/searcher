@@ -10,12 +10,18 @@ export const ACCOUNTS: GitHubAccountConfig[] = [
   { login: 'adobemre1', tokenEnv: 'GITHUB_TOKEN_ADOBEMRE1' }
 ];
 
-export const PORT = 3000; // Hardcoded by infrastructure requirements
+// Loopback by default: this is a personal local tool serving private repo
+// contents with no auth layer. HOST=0.0.0.0 only for sandboxed containers.
+export const HOST = process.env.HOST || '127.0.0.1';
+export const PORT = Number(process.env.PORT) || 3000;
+
+export const JOURNAL_ENABLED = process.env.JOURNAL_ENABLED !== 'false';
 
 export const CACHE_DIR = path.join(process.cwd(), '.cache');
 export const INDEX_DIR = path.join(CACHE_DIR, 'index');
 export const TMP_DIR = path.join(CACHE_DIR, 'tmp');
 export const ETAGS_FILE = path.join(CACHE_DIR, 'etags.json');
+export const JOURNAL_DIR = path.join(CACHE_DIR, 'journal');
 
 // Excluded directories from scanning
 export const EXCLUDED_DIRS = [
@@ -53,3 +59,11 @@ export const EXCLUDED_EXTENSIONS = [
 export const MAX_FILES_PER_REPO = 5000;
 export const MAX_TEXT_SIZE_BYTES_PER_REPO = 50 * 1024 * 1024; // 50 MB
 export const MAX_SINGLE_FILE_SIZE_BYTES = 1024 * 1024; // 1 MB
+
+// Demo mode (no token for the account): skip repos larger than this to
+// protect the unauthenticated 60 req/hr budget. GitHub lists size in KB.
+export const DEMO_MAX_REPO_KB = 10 * 1024; // 10 MB
+
+// Regex search guard rails
+export const REGEX_MAX_PATTERN_LENGTH = 256;
+export const REGEX_TIMEOUT_MS = 2000;

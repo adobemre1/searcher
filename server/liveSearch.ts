@@ -1,8 +1,9 @@
 import { githubFetch, getTokenForAccount, logSafe } from './github.js';
-import { maskSecrets } from './mask.ts';
-import { SearchResponse, SearchResult } from './searchIndex.ts';
+import { maskSecrets } from './mask.js';
+import { ACCOUNTS } from './config.js';
+import { SearchResponse, SearchResult } from './searchIndex.js';
 
-// 1. Sleek, high-performance in-memory LRU Cache
+// 1. Simple in-memory LRU cache
 class SimpleLRU<K, V> {
   private cache = new Map<K, { value: V; expiresAt: number }>();
   constructor(private maxEntries = 50, private ttlMs = 5 * 60 * 1000) {}
@@ -14,7 +15,6 @@ class SimpleLRU<K, V> {
       this.cache.delete(key);
       return null;
     }
-    // Move to end (fresh item order)
     this.cache.delete(key);
     this.cache.set(key, entry);
     return entry.value;
@@ -24,7 +24,6 @@ class SimpleLRU<K, V> {
     if (this.cache.has(key)) {
       this.cache.delete(key);
     } else if (this.cache.size >= this.maxEntries) {
-      // Evict oldest (which is the first element in map iteration)
       const oldestKey = this.cache.keys().next().value;
       if (oldestKey !== undefined) {
         this.cache.delete(oldestKey);
@@ -36,7 +35,8 @@ class SimpleLRU<K, V> {
 
 const liveSearchCache = new SimpleLRU<string, SearchResponse>();
 
-// 2. High-precision anti-burst single-flight ticketing queue per account
+// 2. Single-flight anti-burst queue per account token (≥6.5s spacing keeps us
+//    inside the ~10 req/min code-search budget with margin).
 class TicketQueue {
   private lastExecuted = 0;
   private queue: (() => void)[] = [];
@@ -51,9 +51,8 @@ class TicketQueue {
     });
   }
 
-  // Freeze the queue temporarily when hit with secondary rate limits (Retry-After)
   freeze(durationMs: number) {
-    logSafe(`Freezing live search token queue for ${durationMs / 1000} seconds due to GitHub rate-limit instructions.`);
+    logSafe(`Freezing live search queue for ${Math.round(durationMs / 1000)}s per GitHub rate-limit instructions.`);
     this.lastExecuted = Date.now() + durationMs;
   }
 
@@ -81,7 +80,6 @@ class TicketQueue {
   }
 }
 
-// Map account login to a dedicated spacing queue
 const queues: Record<string, TicketQueue> = {};
 
 function getQueueForAccount(login: string): TicketQueue {
@@ -91,8 +89,12 @@ function getQueueForAccount(login: string): TicketQueue {
   return queues[login];
 }
 
+const configuredLogins = () => ACCOUNTS.map(a => a.login);
+
 /**
- * Searches live GitHub code search API following strict rate bounds.
+ * Live GitHub code search proxy under strict rate discipline.
+ * Note: text-match fragments carry no line numbers — results use
+ * lineNumber: null and the UI links without a line anchor.
  */
 export async function searchLiveOnGitHub(params: {
   q: string;
@@ -108,46 +110,39 @@ export async function searchLiveOnGitHub(params: {
     return { results: [], pathMatches: [], totalFound: 0, truncated: false, tookMs: 0, apiCallsUsed: 0 };
   }
 
-  // 1. Key calculations for LRU Cache
   const cacheKey = JSON.stringify({ q: rawQuery, accounts: params.accounts, repos: params.repos });
   const cachedMatch = liveSearchCache.get(cacheKey);
   if (cachedMatch) {
-    logSafe(`Cache hit for search query: "${rawQuery}"`);
-    return { ...cachedMatch, tookMs: Date.now() - startTime }; // Instant response
+    return { ...cachedMatch, tookMs: Date.now() - startTime };
   }
 
-  // 2. Decide login context with preferred token
-  let activeLogin = 'eCy-coding';
+  // Pick an authenticated login (accounts come from config, never hardcoded)
+  let activeLogin = configuredLogins()[0];
   if (params.accounts && params.accounts.length > 0) {
     activeLogin = params.accounts[0];
   } else {
-    // Find first account with token as fallback
-    const authedAccount = ['eCy-coding', 'adobemre1'].find(login => getTokenForAccount(login) !== null);
+    const authedAccount = configuredLogins().find(login => getTokenForAccount(login) !== null);
     if (authedAccount) {
       activeLogin = authedAccount;
     }
   }
 
-  // Enforce zero-token fallback limit check
   const hasToken = getTokenForAccount(activeLogin) !== null;
   if (!hasToken) {
-    throw new Error(`Live mode requires an authenticated GitHub PAT inside .env.local for high rate limits.`);
+    throw new Error('Live mode requires a GitHub PAT in .env.local (the code-search API needs authentication).');
   }
 
-  // 3. Sequential Queue Ticketing per account
   const queue = getQueueForAccount(activeLogin);
   await queue.enqueue();
 
-  // 4. Query compilation including scopes
-  // Schema: /search/code?q=term user:eCy-coding user:adobemre1 repofilters...
   let codeQuery = `${rawQuery}`;
-  
+
   if (params.repos && params.repos.length > 0) {
     for (const repoName of params.repos) {
       codeQuery += ` repo:${repoName}`;
     }
   } else {
-    const scopeAccounts = params.accounts && params.accounts.length > 0 ? params.accounts : ['eCy-coding', 'adobemre1'];
+    const scopeAccounts = params.accounts && params.accounts.length > 0 ? params.accounts : configuredLogins();
     for (const acc of scopeAccounts) {
       codeQuery += ` user:${acc}`;
     }
@@ -157,7 +152,6 @@ export async function searchLiveOnGitHub(params: {
   const searchUrl = `/search/code?q=${encodedQuery}&per_page=${limit}`;
 
   try {
-    // Add text match vendor headers to return precise match offsets
     const customHeaders = {
       'Accept': 'application/vnd.github.text-match+json'
     };
@@ -167,18 +161,8 @@ export async function searchLiveOnGitHub(params: {
       customHeaders
     });
 
-    if (res.status === 403 || res.status === 429) {
-      const retryHeader = res.headers.get('Retry-After');
-      const resetHeader = res.headers.get('x-ratelimit-reset');
-      let waitSeconds = 60; // Safe default limit freeze
-
-      if (retryHeader) {
-        waitSeconds = parseInt(retryHeader, 10);
-      } else if (resetHeader) {
-        const resetEpoch = parseInt(resetHeader, 10);
-        waitSeconds = Math.max(resetEpoch - Math.floor(Date.now() / 1000), 1);
-      }
-
+    if (res.status === 429 || res.status === 403) {
+      const waitSeconds = res.retryAfterSec || 60;
       queue.freeze(waitSeconds * 1000);
       return {
         results: [],
@@ -192,14 +176,13 @@ export async function searchLiveOnGitHub(params: {
     }
 
     if (res.status === 401) {
-      throw new Error(`PAT Authentication invalid (401) on real-time live search.`);
+      throw new Error('PAT authentication invalid (401) on live search.');
     }
 
     if (res.status !== 200) {
-      throw new Error(`GitHub search API returned error status ${res.status}.`);
+      throw new Error(`GitHub search API returned status ${res.status}.`);
     }
 
-    // Parse matching files and line fragments
     const results: SearchResult[] = [];
     const payload = res.body;
 
@@ -207,14 +190,12 @@ export async function searchLiveOnGitHub(params: {
       for (const item of payload.items) {
         const owner = item.repository?.owner?.login || activeLogin;
         const repo = item.repository?.name || '';
-        const path = item.path || '';
+        const filePath = item.path || '';
 
-        // Safely extract text matches if returned by Github matching vendor API
         if (Array.isArray(item.text_matches)) {
           for (const match of item.text_matches) {
             const fragment = match.fragment || '';
-            
-            // Map index positions returned by GitHub API
+
             const matchRanges = Array.isArray(match.matches)
               ? match.matches.map((m: any) => ({
                   start: m.indices[0],
@@ -225,25 +206,26 @@ export async function searchLiveOnGitHub(params: {
             results.push({
               owner,
               repo,
-              path,
+              path: filePath,
               line: maskSecrets(fragment),
-              lineNumber: 1, // Line is approximate in github live search, default to 1
+              // GitHub's text-match API does not return line numbers;
+              // faking "1" produced wrong #L1 deep links.
+              lineNumber: null,
               before: null,
               after: null,
               matchRanges
             });
           }
         } else {
-          // If no specific text highlights are returned, send fallback listing hit
           results.push({
             owner,
             repo,
-            path,
-            line: `${path} matched query`,
-            lineNumber: 1,
+            path: filePath,
+            line: `${filePath} matched query`,
+            lineNumber: null,
             before: null,
             after: null,
-            matchRanges: [{ start: 0, length: path.length }]
+            matchRanges: [{ start: 0, length: filePath.length }]
           });
         }
       }
@@ -259,13 +241,12 @@ export async function searchLiveOnGitHub(params: {
       apiCallsUsed: 1
     };
 
-    // Store in LRU cache
     liveSearchCache.set(cacheKey, response);
 
     return response;
 
   } catch (error: any) {
-    logSafe(`Real-time Search operation failed: ${error?.message}`);
+    logSafe(`Live search failed: ${error?.message}`);
     throw error;
   }
 }

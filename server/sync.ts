@@ -1,10 +1,12 @@
 import fs from 'fs';
+import { writeFile, readFile, unlink } from 'fs/promises';
 import path from 'path';
 import zlib from 'zlib';
 import {
   INDEX_DIR,
   TMP_DIR,
-  ACCOUNTS
+  ACCOUNTS,
+  DEMO_MAX_REPO_KB
 } from './config.js';
 import {
   githubFetch,
@@ -22,7 +24,7 @@ export interface RepoSyncProgress {
   name: string;
   owner: string;
   isPrivate: boolean;
-  status: 'queued' | 'checking' | 'downloading' | 'extracting' | 'indexed' | 'failed' | 'skipped-empty' | 'up-to-date';
+  status: 'queued' | 'checking' | 'downloading' | 'extracting' | 'indexed' | 'failed' | 'skipped-empty' | 'skipped-demo' | 'deferred' | 'up-to-date';
   fileCount: number;
   lineCount: number;
   skipped: SkippedStats | null;
@@ -52,7 +54,6 @@ export const globalSyncStatus: SyncStatus = {
   errorMessage: null
 };
 
-// Local repository registry to store meta of all known repos from listing
 export interface RepoRegistryEntry {
   name: string;
   owner: string;
@@ -66,14 +67,15 @@ export interface RepoRegistryEntry {
   skipped?: SkippedStats | null;
   status: RepoSyncProgress['status'] | 'unknown';
   stale: boolean;
-  size?: number; // raw size on disk
+  size?: number; // shard size on disk (bytes)
+  repoSizeKb?: number; // upstream repo size (KB, from listing)
 }
 
-export let globalRepoRegistry: Record<string, RepoRegistryEntry> = {};
+// const + in-place mutation: consumers hold references obtained at import
+// time (including dynamic-import destructuring, which is NOT a live binding),
+// so this object must never be reassigned.
+export const globalRepoRegistry: Record<string, RepoRegistryEntry> = {};
 
-/**
- * Ensures system directory tree layout on startup.
- */
 export function ensureDirs() {
   if (!fs.existsSync(INDEX_DIR)) {
     fs.mkdirSync(INDEX_DIR, { recursive: true });
@@ -83,8 +85,12 @@ export function ensureDirs() {
   }
 }
 
+export function hasAnyToken(): boolean {
+  return ACCOUNTS.some(a => getTokenForAccount(a.login) !== null);
+}
+
 /**
- * Load the repository registry metadata based on available compressed shards inside .cache/index/
+ * Load the repository registry metadata from existing shards in .cache/index/
  */
 export function loadRepoRegistry() {
   ensureDirs();
@@ -99,8 +105,7 @@ export function loadRepoRegistry() {
         const decompressed = zlib.gunzipSync(compressed).toString('utf8');
         const payload = JSON.parse(decompressed);
         const key = `${payload.meta.owner}/${payload.meta.repo}`;
-        
-        // Sum total line count across all indexed files
+
         let totalLines = 0;
         if (Array.isArray(payload.files)) {
           for (const file of payload.files) {
@@ -129,30 +134,37 @@ export function loadRepoRegistry() {
     }
   }
 
-  globalRepoRegistry = updatedReg;
+  for (const key of Object.keys(globalRepoRegistry)) {
+    delete globalRepoRegistry[key];
+  }
+  Object.assign(globalRepoRegistry, updatedReg);
   logSafe(`Loaded repo registry from index: ${Object.keys(globalRepoRegistry).length} indexed repositories.`);
 }
 
 /**
- * Checks if the local cache is stale by comparing the default branch HEAD SHA with upstream.
- * This is free and fits into our budget math (F-7) as it executes a single light request.
+ * Refresh the repo inventory and flag stale entries by comparing pushed_at.
+ * Skipped automatically when no account has a token: each boot would otherwise
+ * burn the unauthenticated 60 req/hr budget (T-15).
  */
 export async function checkStaleness() {
   ensureDirs();
-  const accountsToSync = ACCOUNTS;
-  
-  logSafe(`Checking repository inventory and branch staleness...`);
-  
-  for (const account of accountsToSync) {
+
+  if (!hasAnyToken()) {
+    logSafe('Staleness check skipped: no tokens configured (demo mode preserves the 60 req/hr budget).');
+    return;
+  }
+
+  logSafe('Checking repository inventory and branch staleness...');
+
+  for (const account of ACCOUNTS) {
     try {
       const repos = await listUserRepositories(account.login);
-      
+
       for (const repo of repos) {
         const key = `${repo.owner.login}/${repo.name}`;
         const defaultBranch = repo.default_branch || 'main';
         const existing = globalRepoRegistry[key];
 
-        // Ensure we build registry profile even if not synced yet
         if (!existing) {
           globalRepoRegistry[key] = {
             name: repo.name,
@@ -161,13 +173,14 @@ export async function checkStaleness() {
             defaultBranch,
             pushedAt: repo.pushed_at,
             status: 'unknown',
-            stale: true
+            stale: true,
+            repoSizeKb: repo.size
           };
         } else {
-          // If pushed_at date is newer or status is not indexed
+          existing.repoSizeKb = repo.size;
           const existingPush = new Date(existing.pushedAt).getTime();
           const remotePush = new Date(repo.pushed_at).getTime();
-          
+
           if (remotePush > existingPush + 1000) {
             existing.stale = true;
             existing.pushedAt = repo.pushed_at;
@@ -181,7 +194,7 @@ export async function checkStaleness() {
 }
 
 /**
- * Synchronizes repositories sequentially per account, max 2 concurrently to optimize bandwidth.
+ * Synchronizes repositories, max 2 concurrently, guarded by a mutex.
  */
 export async function runFullSync(options: { force?: boolean } = {}) {
   if (globalSyncStatus.active) {
@@ -197,7 +210,6 @@ export async function runFullSync(options: { force?: boolean } = {}) {
   globalSyncStatus.repos = {};
 
   try {
-    // 1. Fetch repositories tree representation across all authenticated/demo logins
     const reposToProcess: Array<{ login: string; repo: any }> = [];
 
     for (const account of ACCOUNTS) {
@@ -213,8 +225,7 @@ export async function runFullSync(options: { force?: boolean } = {}) {
     }
 
     globalSyncStatus.totalRepos = reposToProcess.length;
-    
-    // Initialize status mapping
+
     for (const item of reposToProcess) {
       const key = `${item.repo.owner.login}/${item.repo.name}`;
       globalSyncStatus.repos[key] = {
@@ -228,7 +239,6 @@ export async function runFullSync(options: { force?: boolean } = {}) {
       };
     }
 
-    // Process repositories with concurrency = 2 for account efficiency (M2)
     const queue = [...reposToProcess];
     const activeWorkers: Promise<void>[] = [];
     const maxConcurrency = 2;
@@ -247,27 +257,26 @@ export async function runFullSync(options: { force?: boolean } = {}) {
       }
     };
 
-    // Spawn 2 parallel threads
     for (let i = 0; i < Math.min(maxConcurrency, queue.length); i++) {
       activeWorkers.push(worker());
     }
 
     await Promise.all(activeWorkers);
-    logSafe(`Full repository synchronizer finished successfully.`);
+    logSafe('Full repository sync finished.');
 
   } catch (err: any) {
-    logSafe(`Sync runtime engine failed: ${err?.message}`);
+    logSafe(`Sync runner failed: ${err?.message}`);
     globalSyncStatus.errorMessage = err?.message || 'Unknown sync error';
   } finally {
     globalSyncStatus.active = false;
-    // Reload search index dynamically on synconization success (M3)
+    // Reload search index after sync (main-thread copy + regex worker copy)
     const { reloadIndex } = await import('./searchIndex.js');
     reloadIndex();
   }
 }
 
 /**
- * Synchronizes a single repository: 304 ETag check, downloaded zip parsing, and compressed storage shard save.
+ * Sync one repository: conditional HEAD check, zipball, extraction, shard.
  */
 async function syncSingleRepository(login: string, repo: any, options: { force?: boolean } = {}) {
   const key = `${repo.owner.login}/${repo.name}`;
@@ -280,19 +289,24 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
   const zipPath = path.join(TMP_DIR, `${login}__${repo.name}.zip`);
 
   try {
-    // 1. Conditional comparison for commit SHA utilizing headers (F-7)
+    // Demo guard: without a token, large repos would burn the tiny budget.
+    const hasToken = getTokenForAccount(login) !== null;
+    if (!hasToken && typeof repo.size === 'number' && repo.size > DEMO_MAX_REPO_KB) {
+      progress.status = 'skipped-demo';
+      progress.error = `Repo ~${Math.round(repo.size / 1024)} MB > demo limit ${Math.round(DEMO_MAX_REPO_KB / 1024)} MB (add a PAT to sync it)`;
+      logSafe(`Skipping ${key} in demo mode: ${repo.size} KB exceeds demo cap.`);
+      return;
+    }
+
     progress.status = 'checking';
     const branchUrl = `/repos/${repo.owner.login}/${repo.name}/branches/${defaultBranch}`;
-    
-    // Check if we have an existing shard for this repo (if not force)
+
     const hasShard = fs.existsSync(shardPath);
     let upstreamSha = '';
 
-    // Check HEAD Branch commit dynamically
     const branchRes = await githubFetch(login, branchUrl, { useETag: !options.force && hasShard });
 
     if (branchRes.status === 304 && hasShard) {
-      // Up to date! Skip everything.
       progress.status = 'up-to-date';
       const localRegistryEntry = globalRepoRegistry[key];
       if (localRegistryEntry) {
@@ -300,7 +314,6 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
         progress.lineCount = localRegistryEntry.lineCount || 0;
         progress.skipped = localRegistryEntry.skipped || null;
       }
-      logSafe(`Skipping ${key}: 304 Not Modified upstream.`);
       return;
     }
 
@@ -311,50 +324,45 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
     }
 
     if (branchRes.status === 404) {
-      progress.status = 'failed';
-      progress.error = 'Repository default branch not found. Might be empty.';
+      progress.status = 'skipped-empty';
+      progress.error = 'Default branch not found (repository may be empty).';
+      return;
+    }
+
+    if (branchRes.status === 429) {
+      progress.status = 'deferred';
+      progress.error = `Rate limited; retry after ~${branchRes.retryAfterSec || 60}s`;
       return;
     }
 
     if (branchRes.status === 200 && branchRes.body) {
       upstreamSha = branchRes.body.commit?.sha || '';
     } else {
-      // Handle fallback default logic
       upstreamSha = repo.pushed_at;
     }
 
-    // Double check if SHA did not change compared to local registry
     const registryEntry = globalRepoRegistry[key];
     if (registryEntry && registryEntry.sha === upstreamSha && hasShard && !options.force) {
       progress.status = 'up-to-date';
       progress.fileCount = registryEntry.fileCount || 0;
       progress.lineCount = registryEntry.lineCount || 0;
       progress.skipped = registryEntry.skipped || null;
-      logSafe(`Skipping ${key}: SHA ${upstreamSha} is identical to cached shard.`);
       return;
     }
 
-    // 2. Fetch Zip ball archive with manual redirect handling (F-2)
     progress.status = 'downloading';
     await downloadRepoZipball(login, repo.owner.login, repo.name, defaultBranch, zipPath);
 
-    // 3. Extract and filter contents under strict limits (HC-10)
     progress.status = 'extracting';
     const parseResult = await extractAndParseZip(zipPath);
 
     if (parseResult.files.length === 0) {
       progress.status = 'skipped-empty';
       progress.skipped = parseResult.skipped;
-      
-      // Cleanup zip trace
-      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-      
-      // Remove stale shard if any
-      if (fs.existsSync(shardPath)) fs.unlinkSync(shardPath);
+      if (fs.existsSync(shardPath)) await unlink(shardPath).catch(() => {});
       return;
     }
 
-    // 4. Compress parsed files representation and save shard
     const shardPayload = {
       meta: {
         owner: repo.owner.login,
@@ -370,9 +378,8 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
     };
 
     const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(shardPayload), 'utf8'));
-    fs.writeFileSync(shardPath, compressed);
+    await writeFile(shardPath, compressed);
 
-    // Update progress metadata properties
     let lineSum = 0;
     for (const f of parseResult.files) {
       lineSum += f.lines.length;
@@ -385,7 +392,6 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
     progress.sha = upstreamSha;
     progress.syncedAt = shardPayload.meta.syncedAt;
 
-    // Update memory registry profile
     globalRepoRegistry[key] = {
       name: repo.name,
       owner: repo.owner.login,
@@ -399,21 +405,19 @@ async function syncSingleRepository(login: string, repo: any, options: { force?:
       skipped: parseResult.skipped,
       status: 'indexed',
       stale: false,
-      size: compressed.length
+      size: compressed.length,
+      repoSizeKb: repo.size
     };
 
-    logSafe(`Successfully indexed ${key}. Files: ${progress.fileCount}, Lines: ${progress.lineCount}`);
+    logSafe(`Indexed ${key}. Files: ${progress.fileCount}, Lines: ${progress.lineCount}`);
 
   } catch (err: any) {
     progress.status = 'failed';
     progress.error = err?.message || 'Sync failed';
     logSafe(`Failed sync on repository ${key}: ${err?.message}`);
   } finally {
-    // 5. Cleanup temp archives
     if (fs.existsSync(zipPath)) {
-      try {
-        fs.unlinkSync(zipPath);
-      } catch {}
+      await unlink(zipPath).catch(() => {});
     }
   }
 }

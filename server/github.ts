@@ -1,8 +1,19 @@
 import fs from 'fs';
 import path from 'path';
+import { createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
 import { ETAGS_FILE, ACCOUNTS } from './config.js';
 
-// Ensure cache directory exists
+// ---------------------------------------------------------------------------
+// ETag store: loaded once, mutated in memory, flushed debounced. The previous
+// implementation re-read and re-wrote the JSON file on every save, which raced
+// against the 2-way concurrent sync workers.
+// ---------------------------------------------------------------------------
+let etags: Record<string, string> = {};
+let etagsLoaded = false;
+let flushTimer: NodeJS.Timeout | null = null;
+
 function ensureCacheDir() {
   const dir = path.dirname(ETAGS_FILE);
   if (!fs.existsSync(dir)) {
@@ -10,10 +21,9 @@ function ensureCacheDir() {
   }
 }
 
-// In-memory or on-disk ETag store
-let etags: Record<string, string> = {};
-
-function loadETags() {
+function loadETagsOnce() {
+  if (etagsLoaded) return;
+  etagsLoaded = true;
   ensureCacheDir();
   if (fs.existsSync(ETAGS_FILE)) {
     try {
@@ -24,23 +34,41 @@ function loadETags() {
   }
 }
 
-function saveETag(url: string, etag: string | null) {
-  if (!etag) return;
-  loadETags();
-  etags[url] = etag;
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushETags();
+  }, 500);
+}
+
+function flushETags() {
   try {
-    fs.writeFileSync(ETAGS_FILE, JSON.stringify(etags, null, 2), 'utf-8');
+    ensureCacheDir();
+    fs.writeFileSync(ETAGS_FILE, JSON.stringify(etags), 'utf-8');
   } catch (err) {
     console.error('Failed to write ETags file:', err);
   }
 }
 
+process.on('exit', () => {
+  if (flushTimer) flushETags();
+});
+
+function saveETag(url: string, etag: string | null) {
+  if (!etag) return;
+  loadETagsOnce();
+  etags[url] = etag;
+  scheduleFlush();
+}
+
 export function getETag(url: string): string | null {
-  loadETags();
+  loadETagsOnce();
   return etags[url] || null;
 }
 
 export function clearETags() {
+  loadETagsOnce();
   etags = {};
   if (fs.existsSync(ETAGS_FILE)) {
     try {
@@ -49,7 +77,8 @@ export function clearETags() {
   }
 }
 
-// Map account login to verified status and rate limit state
+// ---------------------------------------------------------------------------
+
 export interface RateLimitState {
   limit: number;
   remaining: number;
@@ -90,17 +119,55 @@ export function getGitHubHeaders(login: string, customHeaders: Record<string, st
   return headers;
 }
 
-// Safe console logger that masks any personal access token
+// Safe console logger that masks any token shape that could end up in a message
 export function logSafe(msg: string) {
   let safeMsg = msg;
-  // Mask ghp_ and other token structures in logging
-  safeMsg = safeMsg.replace(/ghp_[A-Za-z0-9]{36}/g, 'ghp_••••••••••••••••••••••••••••••••');
-  safeMsg = safeMsg.replace(/github_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_••••••••••••••••••••');
+  safeMsg = safeMsg.replace(/gh[pousr]_[A-Za-z0-9]{36,}/g, 'gh•_••••••••');
+  safeMsg = safeMsg.replace(/github_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_••••');
   console.log(`[GitHubClient] ${safeMsg}`);
 }
 
 /**
- * Executes a GitHub API request with ETag checking, pagination tracking, retries, and rate limit discipline.
+ * Parses a Retry-After header that may be either delta-seconds or an HTTP-date
+ * (both are legal per RFC 9110). Returns a bounded wait in milliseconds.
+ * NaN from date-form headers previously produced a zero-wait hot retry loop.
+ */
+export function parseRetryAfterMs(retryAfter: string | null, rateLimitReset: string | null): number | null {
+  if (retryAfter) {
+    const asSeconds = Number(retryAfter);
+    if (Number.isFinite(asSeconds)) {
+      return Math.max(1000, asSeconds * 1000);
+    }
+    const asDate = Date.parse(retryAfter);
+    if (!Number.isNaN(asDate)) {
+      return Math.max(1000, asDate - Date.now());
+    }
+    return 1000;
+  }
+  if (rateLimitReset) {
+    const resetEpoch = parseInt(rateLimitReset, 10);
+    if (Number.isFinite(resetEpoch)) {
+      return Math.max(1000, resetEpoch * 1000 - Date.now());
+    }
+  }
+  return null;
+}
+
+// In-request waits are capped: a long secondary limit must not hang a request
+// for hours. Longer waits are surfaced to the caller as a structured 429.
+const MAX_INREQUEST_WAIT_MS = 60_000;
+
+export interface GitHubFetchResult {
+  status: number;
+  body: any;
+  headers: Headers;
+  fromETag: boolean;
+  retryAfterSec?: number;
+}
+
+/**
+ * Executes a GitHub API request with ETag caching, bounded Retry-After
+ * discipline, pagination-friendly raw headers and 5xx retries.
  */
 export async function githubFetch(
   login: string,
@@ -112,7 +179,7 @@ export async function githubFetch(
     useETag?: boolean;
     ignoreErrors?: boolean;
   } = {}
-): Promise<{ status: number; body: any; headers: Headers; fromETag: boolean }> {
+): Promise<GitHubFetchResult> {
   const method = options.method || 'GET';
   const useETag = options.useETag !== false && method === 'GET';
   const url = urlPath.startsWith('http') ? urlPath : `https://api.github.com${urlPath}`;
@@ -141,49 +208,49 @@ export async function githubFetch(
   while (attempts < maxAttempts) {
     attempts++;
     try {
-      logSafe(`Fetching ${method} ${url} (attempt ${attempts}/${maxAttempts})`);
       const response = await fetch(url, fetchOptions);
 
-      // Handle 401 specifically
+      // 401: fail fast, account is flagged by callers
       if (response.status === 401) {
-        logSafe(`Unauthorized 401 for account ${login}. Dropping/ignoring token.`);
+        logSafe(`Unauthorized 401 for account ${login} on ${urlPath}.`);
         return { status: 401, body: null, headers: response.headers, fromETag: false };
       }
 
-      // Handle 403 / 429 Retry-After discipline
+      // 403/429: honor Retry-After (both formats), bounded
       if (response.status === 403 || response.status === 429) {
-        const retryAfter = response.headers.get('Retry-After');
-        const rateLimitReset = response.headers.get('x-ratelimit-reset');
-        
-        if (retryAfter) {
-          const waitTimeSec = parseInt(retryAfter, 10);
-          logSafe(`Rate limited (403/429) on ${url}. Retry-After instruction says wait ${waitTimeSec} seconds.`);
-          await new Promise(resolve => setTimeout(resolve, waitTimeSec * 1000));
-          continue; // Retry after waiting
-        } else if (rateLimitReset) {
-          const resetEpoch = parseInt(rateLimitReset, 10);
-          const currentEpoch = Math.floor(Date.now() / 1000);
-          const waitTimeSec = Math.max(resetEpoch - currentEpoch, 1);
-          
-          if (waitTimeSec < 10) { // Keep safety wait short for automated routines
-            logSafe(`Rate limit reset in ${waitTimeSec}s. Waiting...`);
-            await new Promise(resolve => setTimeout(resolve, waitTimeSec * 1000));
-            continue;
-          }
+        const waitMs = parseRetryAfterMs(
+          response.headers.get('Retry-After'),
+          response.headers.get('x-ratelimit-reset')
+        );
+
+        if (waitMs !== null && waitMs <= MAX_INREQUEST_WAIT_MS && attempts < maxAttempts) {
+          logSafe(`Rate limited (${response.status}) on ${urlPath}. Waiting ${Math.round(waitMs / 1000)}s (bounded).`);
+          await new Promise(resolve => setTimeout(resolve, waitMs));
+          continue;
         }
+
+        // Too long to wait in-request (or out of attempts): structured deferral
+        const retryAfterSec = waitMs !== null ? Math.ceil(waitMs / 1000) : 60;
+        logSafe(`Rate limited (${response.status}) on ${urlPath}. Deferring ${retryAfterSec}s to caller.`);
+        return {
+          status: 429,
+          body: null,
+          headers: response.headers,
+          fromETag: false,
+          retryAfterSec
+        };
       }
 
-      // Handle server-side 5xx errors with exponential backoff
+      // 5xx: exponential backoff
       if (response.status >= 500) {
         if (attempts < maxAttempts) {
-          logSafe(`Server error ${response.status}. Retrying in ${backoffMs}ms...`);
+          logSafe(`Server error ${response.status} on ${urlPath}. Retrying in ${backoffMs}ms...`);
           await new Promise(resolve => setTimeout(resolve, backoffMs));
           backoffMs *= 2;
           continue;
         }
       }
 
-      // Cache ETag if response is 200 OK
       if (response.status === 200 && useETag) {
         const etagValue = response.headers.get('ETag');
         if (etagValue) {
@@ -191,13 +258,10 @@ export async function githubFetch(
         }
       }
 
-      // Handle cache hit 304
       if (response.status === 304) {
-        logSafe(`304 Not Modified hit for ${url}`);
         return { status: 304, body: null, headers: response.headers, fromETag: true };
       }
 
-      // Parse JSON payload if possible
       let responseBody: any = null;
       const contentType = response.headers.get('content-type') || '';
       if (contentType.includes('application/json')) {
@@ -223,12 +287,14 @@ export async function githubFetch(
     }
   }
 
-  throw new Error(`Failed to complete call to ${url} after ${maxAttempts} attempts.`);
+  throw new Error(`Failed to complete call to ${urlPath} after ${maxAttempts} attempts.`);
 }
 
 /**
- * Handles the manual redirect dance (F-2 and HC-3) specified by GitHub CORS and security behaviors.
- * Node native fetch drops Auth header on multi-domain redirect to codeload.github.com
+ * Downloads a repo zipball using the manual redirect dance: Node fetch strips
+ * the Authorization header on the cross-origin redirect to codeload.github.com,
+ * so we intercept the 302 and follow the pre-signed Location ourselves —
+ * without the auth header. The body is streamed to disk with backpressure.
  */
 export async function downloadRepoZipball(
   login: string,
@@ -240,9 +306,6 @@ export async function downloadRepoZipball(
   const initialUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/${ref}`;
   const headers = getGitHubHeaders(login);
 
-  logSafe(`Initiating manual redirect zipball fetch for ${owner}/${repo} on branch/ref ${ref}`);
-  
-  // 1. Fetch with redirect: 'manual' to intercept 302
   const initialResponse = await fetch(initialUrl, {
     method: 'GET',
     headers,
@@ -257,124 +320,96 @@ export async function downloadRepoZipball(
   if (initialResponse.status === 302 || initialResponse.status === 301) {
     downloadUrl = initialResponse.headers.get('Location') || '';
   } else if (initialResponse.status === 200) {
-    // Some proxies/servers might return the file directly
     downloadUrl = initialUrl;
   } else {
-    throw new Error(`Failed to initiate zipball file download (HTTP Status: ${initialResponse.status})`);
+    throw new Error(`Failed to initiate zipball download (HTTP ${initialResponse.status})`);
   }
 
   if (!downloadUrl) {
-    throw new Error(`Zipball redirect Location not returned by api.github.com`);
+    throw new Error('Zipball redirect Location not returned by api.github.com');
   }
 
   const parsedUrl = new URL(downloadUrl);
-  logSafe(`Redirected to target host: ${parsedUrl.hostname} (Auth header will be omitted for security rules)`);
+  logSafe(`Zipball redirect target host: ${parsedUrl.hostname} (Authorization header omitted on follow)`);
 
-  // Ensure output directory exists
   const parentDir = path.dirname(outputPath);
   if (!fs.existsSync(parentDir)) {
     fs.mkdirSync(parentDir, { recursive: true });
   }
 
-  // 2. Clear authentication token header for codeload.github.com and follow
-  const fileResponse = await fetch(downloadUrl, {
-    method: 'GET',
-    redirect: 'follow'
-  });
+  // Pre-signed URL: no auth header on purpose
+  const fileResponse = await fetch(downloadUrl, { method: 'GET', redirect: 'follow' });
 
   if (!fileResponse.ok) {
-    throw new Error(`HTTP Error downloading zip file from redirect target: ${fileResponse.status} ${fileResponse.statusText}`);
+    throw new Error(`HTTP error downloading zipball: ${fileResponse.status} ${fileResponse.statusText}`);
   }
-
-  // Stream output to zip archive on disk
   if (!fileResponse.body) {
-    throw new Error(`Response body is empty for zip download`);
+    throw new Error('Response body is empty for zip download');
   }
 
-  const fileStream = fs.createWriteStream(outputPath);
-  const reader = fileResponse.body.getReader();
-
-  // Pipe internal chunks safely using a reader loop
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    fileStream.write(Buffer.from(value));
+  try {
+    await pipeline(
+      Readable.fromWeb(fileResponse.body as any),
+      createWriteStream(outputPath)
+    );
+  } catch (err) {
+    fs.unlink(outputPath, () => {});
+    throw err;
   }
-  
-  fileStream.end();
-  
-  return new Promise((resolve, reject) => {
-    fileStream.on('finish', resolve);
-    fileStream.on('error', err => {
-      fs.unlink(outputPath, () => {});
-      reject(err);
-    });
-  });
 }
 
 /**
- * Paginates and loads all user repositories accessible with the provided token.
+ * Paginates and loads all repositories accessible for the account.
+ * Authenticated: /user/repos (owner + collaborator, includes private).
+ * Unauthenticated fallback: /users/{login}/repos (public only, paginated).
  */
 export async function listUserRepositories(login: string): Promise<any[]> {
   const hasToken = getTokenForAccount(login) !== null;
   let repos: any[] = [];
   let page = 1;
   const perPage = 100;
+  let hasMore = true;
 
-  if (hasToken) {
-    // Authenticated path retrieves owned + collaborated + private repos
-    let hasMore = true;
-    while (hasMore) {
-      const url = `/user/repos?per_page=${perPage}&page=${page}&affiliation=owner,collaborator`;
-      const res = await githubFetch(login, url, { useETag: false });
-      
-      if (res.status === 401) {
-        break;
-      }
-      
-      const pageRepos = res.body;
-      if (Array.isArray(pageRepos)) {
-        if (pageRepos.length === 0) {
-          hasMore = false;
-        } else {
-          repos = repos.concat(pageRepos);
-          page++;
-        }
-      } else {
-        hasMore = false;
-      }
+  while (hasMore) {
+    const url = hasToken
+      ? `/user/repos?per_page=${perPage}&page=${page}&affiliation=owner,collaborator`
+      : `/users/${login}/repos?per_page=${perPage}&page=${page}`;
 
-      // Check manual pagination link headers
-      const linkHeader = res.headers.get('Link');
-      if (linkHeader && !linkHeader.includes('rel="next"')) {
-        hasMore = false;
-      }
-    }
-  } else {
-    // Unauthenticated fallback handles public-only repository listing
-    const url = `/users/${login}/repos?per_page=${perPage}&page=${page}`;
     const res = await githubFetch(login, url, { useETag: false });
-    if (Array.isArray(res.body)) {
-      repos = res.body;
+
+    if (res.status === 401 || res.status === 429) {
+      break;
+    }
+
+    const pageRepos = res.body;
+    if (Array.isArray(pageRepos) && pageRepos.length > 0) {
+      repos = repos.concat(pageRepos);
+      page++;
+    } else {
+      hasMore = false;
+    }
+
+    const linkHeader = res.headers.get('Link');
+    if (!linkHeader || !linkHeader.includes('rel="next"')) {
+      hasMore = false;
     }
   }
 
-  // Sort repos by pushed_at descending by default
   repos.sort((a, b) => new Date(b.pushed_at).getTime() - new Date(a.pushed_at).getTime());
   return repos;
 }
 
 /**
- * Gets the current rate limits dynamically from GitHub API (always a free endpoint)
+ * Current rate limits (the /rate_limit endpoint itself is always free).
  */
 export async function getRateLimits(login: string): Promise<AccountTokenState['rateLimits']> {
   try {
     const res = await githubFetch(login, '/rate_limit', { useETag: false, ignoreErrors: true });
     if (res.status !== 200 || !res.body) return null;
-    
+
     const core = res.body.resources.core;
     const search = res.body.resources.search || null;
-    
+
     return {
       core: {
         limit: core.limit,
