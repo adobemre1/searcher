@@ -187,3 +187,53 @@ export async function search(params: SearchParams): Promise<SearchResponse> {
   }
   return res.json();
 }
+
+export interface SearchLog {
+  id: string;
+  timestamp: string;
+  q: string;
+  mode: 'mirror' | 'live';
+  regex: boolean;
+  word: boolean;
+  caseSensitive: boolean;
+  fold: boolean;
+  accounts?: string[];
+  repos?: string[];
+  path?: string;
+  ext?: string;
+  tookMs: number;
+  totalFound: number;
+  resultsCount: number;
+}
+
+export interface TelemetryData {
+  cpuCoresCount: number;
+  estimatedScanRateMBps: number;
+  nodejsMemory: {
+    rss: number;
+    heapUsed: number;
+    heapTotal: number;
+  };
+  averages: {
+    mirrorTookMs: number;
+    liveTookMs: number;
+    totalSearches: number;
+  };
+  coresStatus: { id: number; active: boolean; loadPercent: number }[];
+}
+
+export async function getSearchHistory(): Promise<SearchLog[]> {
+  const res = await fetch('/api/history');
+  return res.json();
+}
+
+export async function clearSearchHistory(): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch('/api/history/clear', { method: 'POST' });
+  return res.json();
+}
+
+export async function getTelemetryData(): Promise<TelemetryData> {
+  const res = await fetch('/api/telemetry');
+  return res.json();
+}
+

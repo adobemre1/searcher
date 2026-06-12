@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Search, SlidersHorizontal, RefreshCw, HelpCircle, Monitor } from 'lucide-react';
+import { Search, SlidersHorizontal, RefreshCw, HelpCircle, Monitor, Cpu } from 'lucide-react';
 
 interface SearchBarProps {
   q: string;
@@ -19,6 +19,7 @@ interface SearchBarProps {
   openDoctor: () => void;
   isSyncing: boolean;
   toggleSyncPanel: () => void;
+  openTelemetry: () => void;
 }
 
 export default function SearchBar({
@@ -38,7 +39,8 @@ export default function SearchBar({
   isSearching,
   openDoctor,
   isSyncing,
-  toggleSyncPanel
+  toggleSyncPanel,
+  openTelemetry
 }: SearchBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -174,6 +176,15 @@ export default function SearchBar({
         </div>
 
         {/* Doctor & Sync Buttons */}
+        <button
+          onClick={openTelemetry}
+          className="bg-[#0F1115] hover:text-[#4F8CFF] border border-[#2A2C2E] px-3 py-1.5 rounded flex items-center gap-1.5 text-xs transition-colors font-semibold text-[#E3E3E3]"
+          title="Open M4 High-Performance Telemetry Logs"
+        >
+          <Cpu className="w-3.5 h-3.5 text-[#4F8CFF]" />
+          <span>M4 Telemetry</span>
+        </button>
+
         <button
           onClick={openDoctor}
           className="bg-[#0F1115] text-[#E3E3E3] hover:text-[#4F8CFF] border border-[#2A2C2E] p-1.5 rounded transition-colors"

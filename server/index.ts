@@ -35,6 +35,13 @@ import {
 import {
   maskSecrets
 } from './mask.ts';
+import {
+  loadHistory,
+  logSearch,
+  getHistory,
+  clearHistory,
+  getTelemetry
+} from './history.js';
 
 // 1. Initial configuration setup
 dotenv.config();
@@ -46,6 +53,7 @@ app.use(express.json());
 ensureDirs();
 loadRepoRegistry();
 loadIndexIntoMemory();
+loadHistory();
 
 // Trigger an asynchronous check for repository updates on startup
 checkStaleness().then(() => {
@@ -186,6 +194,22 @@ app.get('/api/search', async (req, res) => {
         repos,
         limit: limitVal || 50
       });
+      // Log event
+      logSearch({
+        q,
+        mode: 'live',
+        regex,
+        word,
+        caseSensitive,
+        fold,
+        accounts,
+        repos,
+        path: pathQuery,
+        ext,
+        tookMs: liveResult.tookMs,
+        totalFound: liveResult.totalFound,
+        resultsCount: liveResult.results.length
+      });
       return res.json(liveResult);
     } else {
       const mirrorResult = searchMirror({
@@ -199,6 +223,22 @@ app.get('/api/search', async (req, res) => {
         pathQuery,
         ext,
         limit: limitVal || 500
+      });
+      // Log event
+      logSearch({
+        q,
+        mode: 'mirror',
+        regex,
+        word,
+        caseSensitive,
+        fold,
+        accounts,
+        repos,
+        path: pathQuery,
+        ext,
+        tookMs: mirrorResult.tookMs,
+        totalFound: mirrorResult.totalFound,
+        resultsCount: mirrorResult.results.length
       });
       return res.json(mirrorResult);
     }
@@ -295,6 +335,44 @@ app.get('/api/doctor', async (req, res) => {
     ok: allPass,
     diagnostics
   });
+});
+
+/**
+ * Endpoint to retrieve search history log traces (M4 Pro Max power telemetry)
+ */
+app.get('/api/history', (req, res) => {
+  res.json(getHistory());
+});
+
+/**
+ * Endpoint to clear all search history traces
+ */
+app.post('/api/history/clear', (req, res) => {
+  clearHistory();
+  res.json({ ok: true, message: 'Search trace logs fully purged.' });
+});
+
+/**
+ * Endpoint for high-fidelity performance metrics tuned for M4 Pro Max processor monitoring
+ */
+app.get('/api/telemetry', (req, res) => {
+  // Read size of .cache/index to estimate active index size dynamically
+  let totalBytes = 1024 * 1024 * 5; // 5 MB fallback default
+  try {
+    if (fs.existsSync(INDEX_DIR)) {
+      const gzs = fs.readdirSync(INDEX_DIR).filter(f => f.endsWith('.json.gz'));
+      let compressedBytes = 0;
+      for (const gz of gzs) {
+        compressedBytes += fs.statSync(path.join(INDEX_DIR, gz)).size;
+      }
+      // Uncompressed size estimate (heuristically estimated via standard 5x compression ratio of code json archives)
+      totalBytes = compressedBytes * 5;
+    }
+  } catch {}
+  
+  const totalMB = parseFloat((totalBytes / (1024 * 1024)).toFixed(2));
+  const telemetry = getTelemetry(totalMB);
+  res.json(telemetry);
 });
 
 // ==========================================

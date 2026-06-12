@@ -19,6 +19,7 @@ import SyncPanel from './components/SyncPanel';
 import StatusBar from './components/StatusBar';
 import DemoBanner from './components/DemoBanner';
 import DoctorModal from './components/DoctorModal';
+import TelemetryDrawer from './components/TelemetryDrawer';
 
 export default function App() {
   // Database configuration states
@@ -50,6 +51,7 @@ export default function App() {
   // Layout UI states
   const [isSyncPanelOpen, setIsSyncPanelOpen] = useState(false);
   const [isDoctorOpen, setIsDoctorOpen] = useState(false);
+  const [isTelemetryOpen, setIsTelemetryOpen] = useState(false);
 
   const searchTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -189,6 +191,22 @@ export default function App() {
     };
   }, [q, mode, regex, word, caseSensitive, fold, selectedAccounts, selectedRepos, pathQuery, extQuery]);
 
+  const handleSelectHistoryQuery = (query: string, config?: any) => {
+    setQ(query);
+    if (config) {
+      if (config.mode) setMode(config.mode);
+      if (config.regex !== undefined) setRegex(config.regex);
+      if (config.word !== undefined) setWord(config.word);
+      if (config.caseSensitive !== undefined) setCaseSensitive(config.caseSensitive);
+      if (config.fold !== undefined) setFold(config.fold);
+      if (config.path !== undefined) setPathQuery(config.path || '');
+      if (config.ext !== undefined) setExtQuery(config.ext || '');
+      if (config.accounts && config.accounts.length > 0) setSelectedAccounts(config.accounts);
+      if (config.repos && config.repos.length > 0) setSelectedRepos(config.repos);
+    }
+    setIsTelemetryOpen(false);
+  };
+
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-[#0F1115] text-[#E3E3E3] font-sans">
       {/* Amber Demo Disclaimer strip if tokens are missing */}
@@ -213,6 +231,7 @@ export default function App() {
         openDoctor={() => setIsDoctorOpen(true)}
         isSyncing={syncStatus?.active || false}
         toggleSyncPanel={() => setIsSyncPanelOpen(!isSyncPanelOpen)}
+        openTelemetry={() => setIsTelemetryOpen(true)}
       />
 
       {/* Main body of layout split into Filters sidebar and results panel */}
@@ -253,6 +272,13 @@ export default function App() {
 
       {/* System diagnostics Doctor modal */}
       <DoctorModal isOpen={isDoctorOpen} onClose={() => setIsDoctorOpen(false)} />
+
+      {/* High-fidelity Telemetry & Search trace audit logs */}
+      <TelemetryDrawer 
+        isOpen={isTelemetryOpen} 
+        onClose={() => setIsTelemetryOpen(false)} 
+        onSelectQuery={handleSelectHistoryQuery} 
+      />
 
       {/* Footer statistics gauges */}
       <StatusBar 
