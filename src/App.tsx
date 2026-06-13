@@ -88,8 +88,10 @@ export default function App() {
 
   // Status indicators
   const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [rateWaitSec, setRateWaitSec] = useState<number | null>(null);
 
   // Layout UI states
   const [isSyncPanelOpen, setIsSyncPanelOpen] = useState(false);
@@ -236,9 +238,12 @@ export default function App() {
     const params = buildParams();
     setIsSearching(true);
     setSearchError(null);
+    setRateWaitSec(null);
     try {
-      const res = await search(params);
+      // A fresh search always starts at page 1 (live mode).
+      const res = await search({ ...params, livePage: 1 });
       setSearchResponse(res);
+      if (res.retryAfterSec) setRateWaitSec(res.retryAfterSec);
 
       if (dwellTimerRef.current) {
         clearTimeout(dwellTimerRef.current);
@@ -297,6 +302,52 @@ export default function App() {
     }
   }, [rerunNonce]);
 
+  // Load the next page of live results and append (rate-safe: the server's
+  // single-flight queue spaces calls ≥ 6.5 s).
+  const handleLoadMore = async () => {
+    if (!searchResponse || !searchResponse.hasMore || isLoadingMore) return;
+    const nextPage = (searchResponse.page || 1) + 1;
+    setIsLoadingMore(true);
+    setSearchError(null);
+    try {
+      const res = await search({ ...buildParams(), livePage: nextPage });
+      if (res.retryAfterSec) setRateWaitSec(res.retryAfterSec);
+      setSearchResponse(prev => prev ? {
+        ...res,
+        results: [...prev.results, ...res.results],
+        pathMatches: prev.pathMatches
+      } : res);
+    } catch (err: any) {
+      setSearchError(err?.message || 'Failed to load more results');
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
+  // Discovery: jump straight from a thin mirror result to all of GitHub.
+  const handleGoGlobal = () => {
+    setMode('live');
+    setLiveScope('global');
+    setRerunNonce(n => n + 1);
+  };
+
+  // Switching into Live mode defaults to All-GitHub scope (the user's intent
+  // when they reach for live search), unless they came in via "My repos".
+  const handleSetMode = (next: 'mirror' | 'live' | 'semantic') => {
+    if (next === 'live' && mode !== 'live') {
+      setLiveScope('global');
+    }
+    setMode(next);
+  };
+
+  // Live rate-limit countdown banner
+  useEffect(() => {
+    if (rateWaitSec === null) return;
+    if (rateWaitSec <= 0) { setRateWaitSec(null); return; }
+    const t = setTimeout(() => setRateWaitSec(s => (s !== null ? s - 1 : null)), 1000);
+    return () => clearTimeout(t);
+  }, [rateWaitSec]);
+
   const handleSelectJournalQuery = (query: string, config?: Partial<Pick<JournalEntry, 'mode' | 'flags' | 'filters'>>) => {
     setQ(query);
     if (config?.mode) setMode(config.mode);
@@ -324,7 +375,7 @@ export default function App() {
         q={q}
         setQ={setQ}
         mode={mode}
-        setMode={setMode}
+        setMode={handleSetMode}
         regex={regex}
         setRegex={setRegex}
         word={word}
@@ -376,7 +427,21 @@ export default function App() {
             </div>
           )}
 
-          <ResultList response={searchResponse} isSearching={isSearching} q={q} />
+          {rateWaitSec !== null && rateWaitSec > 0 && (
+            <div className="bg-amber-950/40 border-b border-amber-900/50 p-3 text-amber-400 font-mono text-xs flex items-center gap-2 shrink-0">
+              <span>GitHub rate limit reached — live search paused for {rateWaitSec}s. Mirror search still works.</span>
+            </div>
+          )}
+
+          <ResultList
+            response={searchResponse}
+            isSearching={isSearching}
+            q={q}
+            mode={mode}
+            onLoadMore={handleLoadMore}
+            isLoadingMore={isLoadingMore}
+            onGoGlobal={handleGoGlobal}
+          />
         </div>
 
         <SyncPanel

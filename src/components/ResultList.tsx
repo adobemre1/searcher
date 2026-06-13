@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import { SearchResponse, SearchResult } from '../api';
 import ResultItem from './ResultItem';
-import { Sparkles, Terminal, FileText, LayoutList } from 'lucide-react';
+import { Sparkles, Terminal, FileText, LayoutList, Globe, Loader, ChevronDown } from 'lucide-react';
 
 interface ResultListProps {
   response: SearchResponse | null;
   isSearching: boolean;
   q: string;
+  mode: 'mirror' | 'live' | 'semantic';
+  onLoadMore: () => void;
+  isLoadingMore: boolean;
+  onGoGlobal: () => void;
 }
 
-export default function ResultList({ response, isSearching, q }: ResultListProps) {
+export default function ResultList({ response, isSearching, q, mode, onLoadMore, isLoadingMore, onGoGlobal }: ResultListProps) {
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
 
   if (isSearching) {
@@ -72,7 +76,16 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
       <div className="flex-1 bg-[#0F1115] flex flex-col items-center justify-center p-6 text-center text-gray-550 select-none">
         <Terminal className="w-8 h-8 mb-2 text-zinc-650" />
         <span className="text-sm text-zinc-400 font-semibold mb-1">No matches found</span>
-        <span className="text-xs text-zinc-550">Try modifying your folding parameters or spelling accuracy.</span>
+        <span className="text-xs text-zinc-550 mb-4">Try modifying your folding parameters or spelling accuracy.</span>
+        {mode !== 'live' && (
+          <button
+            onClick={onGoGlobal}
+            className="bg-[#4F8CFF] text-[#0F1115] font-bold text-xs px-4 py-2 rounded flex items-center gap-2 hover:bg-[#3d70cc] transition-colors"
+          >
+            <Globe className="w-4 h-4" />
+            <span>Search all of GitHub →</span>
+          </button>
+        )}
       </div>
     );
   }
@@ -91,14 +104,25 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
     <div className="flex-1 bg-[#0F1115] overflow-y-auto flex flex-col select-text">
       {/* 1. Header Toolbar */}
       <div className="sticky top-0 bg-[#0F1115] border-b border-[#2A2C2E] px-4 py-2 text-xs text-gray-400 flex flex-wrap items-center justify-between gap-2 z-10 font-mono">
-        <div>
-          <span className="text-white font-semibold">{totalFound}</span> results in <span className="text-white">{Object.keys(groupedResults).length}</span> repositories 
-          {truncated && <span className="text-amber-500 ml-1"> (match results truncated to limit cap)</span>}
+        <div className="flex items-center gap-1.5">
+          {mode === 'live' && <Globe className="w-3.5 h-3.5 text-[#4F8CFF]" />}
+          {mode === 'live' && response.totalCount !== undefined ? (
+            <span>
+              showing <span className="text-white font-semibold">{results.length}</span> of{' '}
+              <span className="text-white font-semibold">{response.totalCount > 1000 ? '≈' : ''}{response.totalCount.toLocaleString()}</span> across GitHub
+              {response.totalCount > 1000 && <span className="text-zinc-600"> (first 1,000 reachable)</span>}
+            </span>
+          ) : (
+            <span>
+              <span className="text-white font-semibold">{totalFound}</span> results in <span className="text-white">{Object.keys(groupedResults).length}</span> repositories
+              {truncated && <span className="text-amber-500 ml-1"> (truncated to cap)</span>}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-4">
           <span>took {tookMs} ms</span>
           <span className="bg-zinc-850 px-2 py-0.5 rounded text-[10px]">
-            API Calls utilized: <strong className={apiCallsUsed > 0 ? 'text-amber-400 animate-pulse' : 'text-emerald-400'}>{apiCallsUsed}</strong>
+            API Calls: <strong className={apiCallsUsed > 0 ? 'text-amber-400' : 'text-emerald-400'}>{apiCallsUsed}</strong>
           </span>
         </div>
       </div>
@@ -185,6 +209,29 @@ export default function ResultList({ response, isSearching, q }: ResultListProps
             </div>
           </div>
         ))}
+
+        {/* Load more (live mode pagination, rate-safe on the server) */}
+        {mode === 'live' && response.hasMore && (
+          <div className="flex justify-center py-4">
+            <button
+              onClick={onLoadMore}
+              disabled={isLoadingMore}
+              className="bg-[#1E1F20] border border-[#2A2C2E] hover:border-[#4F8CFF] text-[#E3E3E3] font-semibold text-xs px-5 py-2.5 rounded flex items-center gap-2 transition-colors disabled:opacity-60"
+            >
+              {isLoadingMore ? (
+                <>
+                  <Loader className="w-4 h-4 animate-spin text-[#4F8CFF]" />
+                  <span>Loading next page… (rate-safe, ~6s)</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-4 h-4 text-[#4F8CFF]" />
+                  <span>Load more from GitHub</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

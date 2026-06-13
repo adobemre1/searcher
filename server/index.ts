@@ -213,12 +213,14 @@ app.get('/api/search', async (req, res) => {
   try {
     if (mode === 'live') {
       const scope = req.query.scope === 'global' ? 'global' : 'configured';
+      const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10) || 1) : 1;
       const liveResult = await searchLiveOnGitHub({
         q,
         accounts,
         repos,
         limit: limitVal || 50,
-        scope
+        scope,
+        page
       });
       return res.json(liveResult);
     }

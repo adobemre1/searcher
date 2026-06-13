@@ -38,9 +38,23 @@ browser bundle, responses, or logs.
 |---|---|---|
 | **Mirror** (default) | local index; substring / boolean / whole-word / regex; TR fold | 0 API calls |
 | **Semantic** | local TF-IDF + BM25 saturation + cosine ranking (tunable in Engine Calibration) | 0 API calls |
-| **Live** | GitHub `/search/code` proxy — word-boundary matching, default branch, < 384 KB files, ~10 queries/min, single-flight queue ≥ 6.5 s spacing | 1 API call (cached 5 min) |
+| **Live** | GitHub `/search/code` proxy — **All-GitHub or My-repos scope**, word-boundary matching, default branch, < 384 KB files, ~10 queries/min, single-flight queue ≥ 6.5 s spacing | 1 API call/page (cached 5 min) |
 
 Mirror/semantic search as you type (300 ms debounce). Live fires on Enter only.
+
+### Searching all of GitHub (real-time)
+
+Switch to **Live Mode** → it defaults to the **All GitHub** scope: every query
+runs against GitHub's live code index (no `user:` qualifier). A thin or empty
+Mirror result also shows a **"Search all of GitHub →"** shortcut that jumps
+straight there. The result header shows the true total (`showing 65 of
+≈241,408 across GitHub`) and a **Load more from GitHub** button paginates
+through the results, one rate-safe page at a time.
+
+"All of GitHub" is bounded by the code-search API itself: public + accessible
+repos, **default branch only**, files **< 384 KB**, best-match ranking, and the
+**first 1,000 results** per query (GitHub's hard cap). It is real-time, not
+exhaustive — for exhaustive 0-API search, mirror the repo (External Repos).
 
 ## The Notebook (search journal)
 

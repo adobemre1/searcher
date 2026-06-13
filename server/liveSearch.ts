@@ -102,17 +102,20 @@ export async function searchLiveOnGitHub(params: {
   repos?: string[];
   limit?: number;
   scope?: 'configured' | 'global';
+  page?: number;
 }): Promise<SearchResponse & { retryAfterSec?: number }> {
   const startTime = Date.now();
   const rawQuery = params.q;
-  const limit = params.limit || 50;
+  // GitHub code search caps per_page at 100 and results at 1000 (10 pages).
+  const perPage = Math.min(params.limit || 50, 100);
+  const page = Math.max(1, Math.min(params.page || 1, 10));
   const scope = params.scope || 'configured';
 
   if (!rawQuery) {
-    return { results: [], pathMatches: [], totalFound: 0, truncated: false, tookMs: 0, apiCallsUsed: 0 };
+    return { results: [], pathMatches: [], totalFound: 0, truncated: false, tookMs: 0, apiCallsUsed: 0, page: 1, hasMore: false, totalCount: 0 };
   }
 
-  const cacheKey = JSON.stringify({ q: rawQuery, accounts: params.accounts, repos: params.repos, scope });
+  const cacheKey = JSON.stringify({ q: rawQuery, accounts: params.accounts, repos: params.repos, scope, page, perPage });
   const cachedMatch = liveSearchCache.get(cacheKey);
   if (cachedMatch) {
     return { ...cachedMatch, tookMs: Date.now() - startTime };
@@ -155,7 +158,7 @@ export async function searchLiveOnGitHub(params: {
   }
 
   const encodedQuery = encodeURIComponent(codeQuery);
-  const searchUrl = `/search/code?q=${encodedQuery}&per_page=${limit}`;
+  const searchUrl = `/search/code?q=${encodedQuery}&per_page=${perPage}&page=${page}`;
 
   try {
     const customHeaders = {
@@ -177,12 +180,20 @@ export async function searchLiveOnGitHub(params: {
         truncated: false,
         tookMs: Date.now() - startTime,
         apiCallsUsed: 1,
-        retryAfterSec: waitSeconds
+        retryAfterSec: waitSeconds,
+        page,
+        hasMore: false,
+        totalCount: 0
       };
     }
 
     if (res.status === 401) {
       throw new Error('PAT authentication invalid (401) on live search.');
+    }
+
+    if (res.status === 422) {
+      // GitHub validation: query too broad / unsupported qualifiers.
+      throw new Error('GitHub could not run this query (too broad or unsupported). Add a more specific term.');
     }
 
     if (res.status !== 200) {
@@ -238,13 +249,21 @@ export async function searchLiveOnGitHub(params: {
     }
 
     const pathMatches = results.map(r => ({ owner: r.owner, repo: r.repo, path: r.path })).slice(0, 10);
+    const total = payload?.total_count || results.length;
+    // GitHub serves at most 1000 results (10 pages); more pages exist only
+    // while there's a full page of items and we're under the page cap.
+    const itemsThisPage = Array.isArray(payload?.items) ? payload.items.length : 0;
+    const hasMore = page < 10 && itemsThisPage >= perPage && page * perPage < Math.min(total, 1000);
     const response: SearchResponse = {
       results,
       pathMatches,
-      totalFound: payload?.total_count || results.length,
-      truncated: results.length < (payload?.total_count || 0),
+      totalFound: total,
+      truncated: total > Math.min(total, 1000),
       tookMs: Date.now() - startTime,
-      apiCallsUsed: 1
+      apiCallsUsed: 1,
+      page,
+      hasMore,
+      totalCount: total
     };
 
     liveSearchCache.set(cacheKey, response);

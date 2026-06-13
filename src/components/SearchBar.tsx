@@ -146,9 +146,17 @@ export default function SearchBar({
           </button>
         </div>
 
-        {/* Live scope: My repos (user: qualifier) vs Global (all of GitHub) */}
+        {/* Live scope: All GitHub (no qualifier) vs My repos (user: qualifier) */}
         {mode === 'live' && (
           <div className="bg-[#0F1115] border border-[#2A2C2E] p-0.5 rounded flex items-center" title="Live mode scope">
+            <button
+              onClick={() => setLiveScope('global')}
+              className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
+                liveScope === 'global' ? 'bg-zinc-800 text-[#4F8CFF]' : 'text-gray-500 hover:text-white'
+              }`}
+            >
+              All GitHub
+            </button>
             <button
               onClick={() => setLiveScope('configured')}
               className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
@@ -156,14 +164,6 @@ export default function SearchBar({
               }`}
             >
               My repos
-            </button>
-            <button
-              onClick={() => setLiveScope('global')}
-              className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
-                liveScope === 'global' ? 'bg-zinc-800 text-[#4F8CFF]' : 'text-gray-500 hover:text-white'
-              }`}
-            >
-              Global
             </button>
           </div>
         )}

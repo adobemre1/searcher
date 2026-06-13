@@ -46,6 +46,10 @@ export interface SearchResponse {
   tookMs: number;
   apiCallsUsed: number;
   explanation?: string;
+  // Live-mode pagination (mirror/semantic leave these undefined)
+  page?: number;
+  hasMore?: boolean;
+  totalCount?: number;
 }
 
 // In-memory code search index

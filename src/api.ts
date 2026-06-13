@@ -80,6 +80,10 @@ export interface SearchResponse {
   apiCallsUsed: number;
   explanation?: string;
   retryAfterSec?: number;
+  // Live-mode pagination
+  page?: number;
+  hasMore?: boolean;
+  totalCount?: number;
 }
 
 export interface RateLimitState {
@@ -183,6 +187,7 @@ export interface SearchParams {
   b?: number;
   maxLineLength?: number;
   liveScope?: 'configured' | 'global';
+  livePage?: number;
 }
 
 export async function search(params: SearchParams): Promise<SearchResponse> {
@@ -223,6 +228,9 @@ export async function search(params: SearchParams): Promise<SearchResponse> {
   }
   if (params.mode === 'live' && params.liveScope) {
     urlParams.set('scope', params.liveScope);
+  }
+  if (params.mode === 'live' && params.livePage && params.livePage > 1) {
+    urlParams.set('page', String(params.livePage));
   }
 
   const res = await fetch(`/api/search?${urlParams.toString()}`);
